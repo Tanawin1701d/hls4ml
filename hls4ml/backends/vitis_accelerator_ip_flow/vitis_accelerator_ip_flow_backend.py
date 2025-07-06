@@ -23,6 +23,7 @@ class VitisAcceleratorIPFlowBackend(VitisBackend):
         vsynth=False,
         fifo_opt=False,
         bitfile=False,
+        log_to_stdout=True,
     ):
         # run the VitisBackend build
         super().build(
@@ -35,6 +36,7 @@ class VitisAcceleratorIPFlowBackend(VitisBackend):
             export=export,
             vsynth=vsynth,
             fifo_opt=fifo_opt,
+            log_to_stdout=log_to_stdout,
         )
 
         # now make a bitfile

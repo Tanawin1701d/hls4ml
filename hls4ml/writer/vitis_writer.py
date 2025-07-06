@@ -48,11 +48,12 @@ class VitisWriter(VivadoWriter):
         with open(prj_tcl_file, 'w') as f:
             f.writelines(prj_tcl_contents)
 
-    def write_hls(self, model):
+    def write_hls(self, model, is_multigraph=False):
         """
         Write the HLS project. Calls the steps from VivadoWriter, adapted for Vitis
         """
-        super().write_hls(model)
-        self.write_nnet_utils_overrides(model)
-        self.write_board_script_override(model)
-        self.write_tar(model)
+        super().write_hls(model, is_multigraph=is_multigraph)
+        if not is_multigraph:
+            self.write_nnet_utils_overrides(model)
+            self.write_board_script_override(model)
+            self.write_tar(model)
