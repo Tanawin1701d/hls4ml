@@ -17,4 +17,7 @@ hls4mlprj_*
 .idea/*
 
 mytest/*
+mytest2/*
+mytest3/*
 environment.yml
+example-models/*

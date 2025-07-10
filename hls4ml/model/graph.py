@@ -1063,7 +1063,12 @@ class MultiModelGraph:
         next_index = max(n.index for n in all_nodes)
 
         subgraphs: list['ModelGraph'] = []
+        print("--------- print traversing -----------------")
         for idx, slice_ in enumerate(node_slices):
+
+            ############# print("----------------- print idx ", idx)
+            print(slice_)
+
             cfg_copy = copy.copy(base_model.config)
             cfg_copy.config = copy.copy(base_model.config.config)
             cfg_copy.config['ProjectName'] = f'{base_model.config.get_project_name()}_graph{idx + 1}'
@@ -1077,6 +1082,28 @@ class MultiModelGraph:
                 input_layer = cls._create_input_node(subgraph, slice_[0], input_layer_kind, next_index)
                 graph_dict[input_layer.name] = input_layer
                 slice_[0].inputs = input_layer.outputs
+
+                providedOutputNames = list()
+                #### the output to list
+                for inspnode in slice_:
+                    for outputName in inspnode.outputs:
+                        providedOutputNames.append(outputName)
+
+                for inspnode in slice_[1:]:
+                    newInputs = inspnode.inputs.copy()
+                    shouldRemake = False
+                    for idx, inpName in enumerate(newInputs):
+                        if inpName not in providedOutputNames:
+                            shouldRemake = True
+                            print("detect skip connection named: ", inpName, " @ node ", inspnode.name)
+                            print("create skip input layer")
+                            next_index += 1
+                            newInputNode = cls._create_input_node(subgraph, inspnode, input_layer_kind, next_index)
+                            graph_dict[newInputNode.name] = newInputNode
+                            newInputs[idx] = newInputNode.outputs[0]
+                    if shouldRemake:
+                        inspnode.inputs = newInputs
+
             else:
                 input_layer = base_input_layer
 
@@ -1088,7 +1115,30 @@ class MultiModelGraph:
 
             subgraph.graph = graph_dict
             subgraph.inputs = input_layer.outputs if idx > 0 else base_model.inputs
-            subgraph.outputs = slice_[-1].outputs if idx < len(node_slices) - 1 else base_model.outputs
+
+
+
+            ##### determine the output for current Node
+            if idx < (len(node_slices) - 1):
+                allCurSubGraphOutputs = list(subgraph.output_vars.keys())
+                requiredOutputNode    = set()
+                for nextLayer in node_slices[idx + 1:]:
+                    for nextNode in nextLayer:
+                        for nextInput in nextNode.inputs:
+                            if nextInput in allCurSubGraphOutputs:
+                                requiredOutputNode.add(nextInput)
+                subgraph.outputs = list(requiredOutputNode)
+                print ("the outputs is-------> ")
+                print(subgraph.outputs)
+            else:
+                subgraph.outputs = base_model.outputs
+                print("the outputs is-------> ")
+                print(subgraph.outputs)
+
+            #subgraph.outputs = slice_[-1].outputs if idx < len(node_slices) - 1 else base_model.outputs
+
+
+
             subgraph._applied_flows = base_model._applied_flows
 
             # NOTE might need to examine other subgraph-related flows (i.e., fifo_optimizer)
@@ -1100,6 +1150,8 @@ class MultiModelGraph:
                 input_var.pragma = 'partition'  # NOTE required for subgraph stitching; subject to refinement
 
             subgraphs.append(subgraph)
+
+        print("from_mode_graph_pass")
 
         return cls(subgraphs)
 
@@ -1116,8 +1168,22 @@ class MultiModelGraph:
                 raise ValueError(f"Split layer '{name}' not found in the model.")
             if len(node.inputs) > 1:
                 raise ValueError(f"Cannot split at layer '{name}' (multiple inputs detected).")
-            if model.graph[node.inputs[0]].class_name == 'Reshape' or node.class_name == 'Reshape':
+
+            #### quick patch fix
+
+            hostName = None
+            for key, value in model.graph.items():
+                if value.outputs[0] == node.inputs[0]:
+                    hostName = key
+
+            if model.graph[hostName].class_name == 'Reshape' or node.class_name == 'Reshape':
                 raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
+
+            print("we solve the bug")
+
+            #
+            # if model.graph[node.inputs[0]].class_name == 'Reshape' or node.class_name == 'Reshape':
+            #     raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
 
     @staticmethod
     def _create_input_node(model, next_node, kind, index):
