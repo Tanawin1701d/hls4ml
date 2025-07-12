@@ -16,10 +16,18 @@ from hls4ml.backends.vitis_accelerator_ip_flow.vitis_accelerator_ip_flow_config 
     VitisAcceleratorIPFlowConfig,
 )
 
+from hls4ml.backends.vitis_accelerator_ip_flow_partial.vitis_acip_flow_partial_backend import (
+    VitisAcceleratorIPFlowPartialBackend,
+)
+from hls4ml.backends.vitis_accelerator_ip_flow_partial.vitis_acip_flow_partial_config import (
+    VitisACIPFlowParConfig,
+)
+
 register_backend('Vivado', VivadoBackend)
 register_backend('VivadoAccelerator', VivadoAcceleratorBackend)
 register_backend('Vitis', VitisBackend)
 register_backend('VitisAcceleratorIPFlow', VitisAcceleratorIPFlowBackend)
+register_backend('VitisAcceleratorIPFlowPartial', VitisAcceleratorIPFlowPartialBackend)
 register_backend('Quartus', QuartusBackend)
 register_backend('Catapult', CatapultBackend)
 register_backend('SymbolicExpression', SymbolicExpressionBackend)
