@@ -9,6 +9,10 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         super().__init__()
         self.vitis_accelerator_ip_flow_partial_config = None
 
+    ########################################################
+    ## axi_wrapper.h & axi_wrapper.cpp  function helper ####
+    ########################################################
+    ##### variable
     def getWrapperPortName(self, tensorVar, isInput: bool):
         ioStr = "in" if isInput else "out"
         return f"par_{ioStr}_{tensorVar.name}"
@@ -22,7 +26,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
     def getWrapperIsLastCnt(self, idx):
         return f"isLastCnt_{str(idx)}"
-
+    ##### io
     def write_axi_wrapper_io(self, inps, outs):
         inputList = []
         outputList = []
@@ -35,7 +39,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             raise Exception("No input or output stream found")
         newline = "/////// inputs\n" +  ",\n ".join(inputList) + ",\n\n ///outputs\n " + ", ".join(outputList) + "\n"
         return newline
-
+    ##### content in axi_wrapper.cpp
     def write_axi_wrapper_interface(self, model, inps, outs):
         if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
             newline = ''
@@ -88,7 +92,6 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
 
         return newline
-
 
     def write_axi_wrapper_each_enqueue(self, model, inps, idx):
 
@@ -150,8 +153,6 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
         return newline
 
-
-
     def write_axi_wrapper_insert_call(self, model, inps, outs):
         io_type = model.config.get_config_value("IOType")
         indent = "      "
@@ -165,7 +166,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         newline += ", ".join(inputList) + ", " + ", ".join(outputList) + ");\n"
         return newline
 
-
+    ##### main function
 
     def write_axi_wrapper(self, model):
         '''
@@ -268,14 +269,22 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         f.close()
         fout.close()
 
+    ########################################################
+    ## write test script  function helper    ###############
+    ########################################################
+
+    def write_wrapper_test(self, model):
+        print("[partial reconfig] we are not supporting write_wrapper_test this yet")
+
+    ########################################################
+    ## write test script  function helper    ###############
+    ########################################################
+
     def write_board_script(self, model):
         print("[partial reconfig] we are not supporting write_board_script this yet")
 
     def write_driver(self, model):
         print("[partial reconfig] we are not supporting write_driver this yet")
-
-    def write_wrapper_test(self, model):
-        print("[partial reconfig] we are not supporting write_wrapper_test this yet")
 
     def modify_build_script(self, model):
         '''
