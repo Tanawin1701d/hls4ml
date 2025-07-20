@@ -23,13 +23,6 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
     def getWrapperIsLastCnt(self, idx):
         return f"isLastCnt_{str(idx)}"
 
-    def getPrecisionNameInLayer(self, model, layerName):
-
-        ioLayer = model.graph[layerName]
-        layerprecision = ioLayer.get_layer_precision()
-
-        return list(layerprecision.keys())[0]
-
     def write_axi_wrapper_io(self, inps, outs):
         inputList = []
         outputList = []
@@ -40,7 +33,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
         if len(inputList) == 0 or len(outputList) == 0:
             raise Exception("No input or output stream found")
-        newline = "/////// inputs" ",\n ".join(inputList) + ",\n\n ///outputs\n " + ", ".join(outputList) + "\n"
+        newline = "/////// inputs\n" +  ",\n ".join(inputList) + ",\n\n ///outputs\n " + ", ".join(outputList) + "\n"
         return newline
 
     def write_axi_wrapper_interface(self, model, inps, outs):
@@ -54,37 +47,45 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 portname = self.getWrapperPortName(out, False)
                 newline += indent + f'#pragma HLS INTERFACE axis port={portname}\n'
             if model.config.get_config_value("IOType") == 'io_stream':
+                    newline += indent + '#pragma HLS INTERFACE ap_ctrl_none port=return\n'
                     newline += indent + '#pragma HLS DATAFLOW\n'
             return newline
         else:
             raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ interface retriever")
 
     def write_axi_local_vars(self, model, inps, outs):
+
+        ####### build local stream variable
+
         newline = '///// wrinting local stream vars /////\n'
         if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
             indent = "      "
             ##### loop to build local stream to send data into the system
-
+            newline += '///////// build input vars ///////////\n'
             for idx, inp in enumerate(inps):
                 newline += f"    bool {self.getWrapperIsLastCnt(idx)} = false;\n"
                 portname = self.getWrapperPortNameLocal(inp, True)
                 newline += indent + f'hls::stream<{inp.type.name}> {portname}("{portname}");\n'
+            newline += '///////// build output vars ///////////\n'
             for out in outs:
                 portname = self.getWrapperPortNameLocal(out, False)
                 newline += indent + f'hls::stream<{out.type.name}> {portname}("{portname}");\n'
+
+        ####### set stream DEPTH
 
             newline += '///////// set the stream depth ///////////\n'
             ##### loop to set depth
 
             for inpIdx, inp in enumerate(inps):
                 portname = self.getWrapperPortNameLocal(inp, True)
-                newline += indent + f'#pragma HLS STREAM variable={portname} depth={model.get_input_variables()[inpIdx].pragma[1]}\n'
+                newline += indent + f'#pragma HLS STREAM variable={portname} depth={inps[inpIdx].pragma[1]}\n'
             for outIdx, out in enumerate(outs):
                 portname = self.getWrapperPortNameLocal(out, False)
                 newline += indent + f'#pragma HLS STREAM variable={portname} depth={model.get_output_variables()[outIdx].pragma[1]}\n'
 
         else:
             raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ local vars")
+
 
         return newline
 
@@ -93,14 +94,15 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
         io_type = model.config.get_config_value("IOType")
         indent = "      "
-        newline = ""
+        newline = "\n\n\n"
         if io_type == 'io_stream':
-            newline = '////////////// enqueue number ' + str(idx) + ' //////////////\n'
+            newline += '////////////// enqueue number ' + str(idx) + ' //////////////\n'
             newline += indent + "///// temp var \n"
             newline += indent + f'dma_data_packet {self.getWrapperTmpName(inps[idx], True)};\n'
-            newline += indent + 'for(unsigned i = 0; i < N_IN[' +str(idx) +']/' + self.getPrecisionNameInLayer(model, model.inputs[idx]) + '::size; ++i){\n'
-            newline += indent + indent + self.getPrecisionNameInLayer(model, model.inputs[idx]) + ' ctype;\n'
-            newline += indent + indent + 'for(unsigned j = 0; j < '+ self.getPrecisionNameInLayer(model, model.inputs[idx]) + '::size; ++j){\n'
+            ### newline += indent + f'{inps[idx].type.name}\n'
+            newline += indent + 'for(unsigned i = 0; i < N_IN[' +str(idx) +']/' + inps[idx].type.name + '::size; ++i){\n'
+            newline += indent + indent + inps[idx].type.name + ' ctype;\n'
+            newline += indent + indent + 'for(unsigned j = 0; j < '+ inps[idx].type.name + '::size; ++j){\n'
             if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
                 newline += indent + indent + indent + self.getWrapperPortName(inps[idx], True) + f'.read({self.getWrapperTmpName(inps[0], True)});\n'
                 newline += indent + indent + indent + "ctype[j] = " + self.getWrapperTmpName(inps[idx], True) + ".data;\n"
@@ -122,19 +124,20 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
         io_type = model.config.get_config_value("IOType")
         indent = "      "
-        newline = ""
+        newline = "\n\n\n"
         if io_type == 'io_stream':
-            newline = '////////////// dequeue number ' + str(idx) + ' //////////////\n'
+            newline += '////////////// dequeue number ' + str(idx) + ' //////////////\n'
             newline += indent + "///// temp var \n"
-            newline += indent + f'dma_data_packet {self.getWrapperTmpName(outs[idx], False)};\n'
-            newline += indent + 'for(unsigned i = 0; i < N_OUT[' +str(idx) +']/' + self.getPrecisionNameInLayer(model, model.outputs[idx]) + '::size; ++i){\n'
-            newline += indent + indent + self.getPrecisionNameInLayer(model, model.outputs[idx]) + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
-            newline += indent + indent + 'for(unsigned j = 0; j < ' + self.getPrecisionNameInLayer(model, model.outputs[idx]) + '::size; ++j){\n'
+            newline += indent + f'dma_data_packet {self.getWrapperTmpName(outs[idx], False)} = {self.getWrapperTmpName(inputs[0], True)};\n'
+            ####### the tmp must copy from input to prevent dma get stuck
+            newline += indent + 'for(unsigned i = 0; i < N_OUT[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
+            newline += indent + indent + outs[idx].type.name + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
+            newline += indent + indent + 'for(unsigned j = 0; j < ' + outs[idx].type.name + '::size; ++j){\n'
             if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
                 newline += indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f'.data = ({out_axi_t}) (ctype[j]);\n'
                 poolLastCondition = " & ".join([self.getWrapperIsLastCnt(condIdx) for condIdx  in range(len(inputs))])
                 newline += indent + indent + indent + f"if({poolLastCondition}){{\n"
-                newline += indent + indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f".last = ((i+1)*(j+1)==N_OUT[{str(idx)}]);\n"
+                newline += indent + indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f".last = (((i+1)*(j+1))==N_OUT[{str(idx)}]);\n"
                 newline += indent + indent + indent + "}\n"
                 newline += indent + indent + indent + self.getWrapperPortName(outs[idx], False) + f'.write({self.getWrapperTmpName(outs[idx], False)});\n'
                 newline += indent + indent + "}\n"
@@ -171,6 +174,13 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         inp_axi_t, out_axi_t, inps, outs = self.vitis_accelerator_ip_flow_partial_config.get_corrected_types()
         indent = '    '
 
+        print("------------------------------- input write wrapper is -------------------------")
+        print([inp.name for inp in inps])
+        print(model.inputs)
+        print("------------------------------- output write wrapper is -------------------------")
+        print([out.name for out in outs])
+        print(model.outputs)
+        print("-----------------------------------------------------------------------------------")
 
         ######################
         # myproject_axi.h
@@ -300,7 +310,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         # build_lib.sh
         ###################
 
-        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow/build_lib.sh'))
+        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/build_lib.sh'))
         fout = open(f'{model.config.get_output_dir()}/build_lib.sh', 'w')
 
         for line in f.readlines():
@@ -310,6 +320,14 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             fout.write(line)
         f.close()
         fout.close()
+
+    def write_build_script_multigraph(self, model):
+        """Write the build script (build_lib.sh) for stitched multigraph project
+        Args:
+            model (MultiModelGraph): the hls4ml multigraph model.
+        """
+        out = open(f'{model.config.get_output_dir()}/build_lib.sh', 'w')
+        out.close()
 
     def write_new_tar(self, model):
         super().write_tar(model)
@@ -329,3 +347,6 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             self.write_axi_wrapper(model)
             self.modify_build_script(model)
             self.write_new_tar(model)
+
+
+

@@ -163,7 +163,7 @@ class FPGABackend(Backend):
         Returns:
             string: Returns the name of the compiled library.
         """
-
+        print(f"running at dir {model.config.get_output_dir()}")
         lib_name = None
         ret_val = subprocess.run(
             ['./build_lib.sh'],

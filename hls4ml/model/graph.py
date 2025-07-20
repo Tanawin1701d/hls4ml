@@ -1045,12 +1045,52 @@ class MultiModelGraph:
         self._bind_modelgraph_methods()
         self._initialize_io_attributes(self.graphs)
 
+    ##### reuturn [idx0, idx1] the idx that must be input
+    @staticmethod
+    def analyze_input_from_slice(node_slices, inspectNode, isAnalyzeInput: bool):
+
+        requiredReroute = []
+
+        for idx, ioName in enumerate(inspectNode.inputs if isAnalyzeInput else inspectNode.outputs):
+            shouldReroute = True
+            for curNode in node_slices:
+                #### the same node must be skipped
+                if curNode.name == inspectNode.name:
+                    continue
+                if ioName in (curNode.outputs if isAnalyzeInput else curNode.inputs):
+                    shouldReroute = False
+                    break
+            if shouldReroute:
+                requiredReroute.append(idx)
+
+        return requiredReroute
+
+    ###### meta = [(idx, Node), (idx, Node) ]
+    ###### output = (io_name: [(idx, Node)])
+    @staticmethod
+    def group_for_creating_new_io(meta, isAnalyzeInput: bool):
+
+        rerouted_result = dict()
+
+        for idx, node in meta:
+            ioName = node.inputs[idx] if isAnalyzeInput else node.outputs[idx]
+            if ioName not in rerouted_result:
+                rerouted_result[ioName] = []
+            rerouted_result[ioName].append((idx, node))
+
+        return rerouted_result
+
+
+
+
+
     @classmethod
     def from_model_graph(cls, base_model: ModelGraph, split_before_layers: list[str]):
         """
         Create a MultiModelGraph by splitting a base ModelGraph at specified layer names,
         each initiating a subgraph.
         """
+        print("from multi model graph")
         cls._validate_split_points(base_model, split_before_layers)
         all_nodes = list(base_model.graph.values())
         layer_names = [node.name for node in all_nodes]
@@ -1072,13 +1112,46 @@ class MultiModelGraph:
             subgraph = base_model.__class__(cfg_copy, inputs=[], outputs=[])
             graph_dict = OrderedDict()
 
+            pooled_input_layer = []
+            print("-------------- idx = ", idx)
             if idx > 0:
-                next_index += 1
-                input_layer = cls._create_input_node(subgraph, slice_[0], input_layer_kind, next_index)
-                graph_dict[input_layer.name] = input_layer
-                slice_[0].inputs = input_layer.outputs
+                # next_index += 1
+                # input_layer = cls._create_input_node(subgraph, slice_[0], input_layer_kind, next_index)
+                # graph_dict[input_layer.name] = input_layer
+                # slice_[0].inputs = input_layer.outputs
+                #### analyze the new inputs
+
+                ########### get the required rerouted input first
+
+                requiredReroute = []
+
+                ###### get input for each slice
+                for checkingNode in slice_:
+                    nodeInputChangeList = cls.analyze_input_from_slice(slice_, checkingNode, True)
+                    #### add to requiredReroute
+                    for changeIdx in nodeInputChangeList:
+                        requiredReroute.append((changeIdx, checkingNode))
+
+                ###### grouping it
+                rerouteGrp = cls.group_for_creating_new_io(requiredReroute, True)
+
+                ###### create the node and rerouting it
+
+                for ioName, nodeUpdateList in rerouteGrp.items():
+                    input_layer = cls._create_input_node(subgraph, nodeUpdateList[0][1], input_layer_kind, next_index)
+                    pooled_input_layer.append(input_layer)
+                    graph_dict[input_layer.name] = input_layer
+                    print("added name is ", input_layer.name )
+                    print("output from input layer", input_layer.outputs)
+                    print("input from input layer", input_layer.inputs)
+
+                    next_index += 1
+                    for node_idx, node in nodeUpdateList:
+                        node.inputs[node_idx] = input_layer.outputs[0]
+
             else:
                 input_layer = base_input_layer
+                pooled_input_layer.append(input_layer)
 
             for node in slice_:
                 node.model = subgraph  # fix for layer.model.get_layer_output_variable()
@@ -1086,9 +1159,35 @@ class MultiModelGraph:
                     subgraph.output_vars[out_name] = base_model.output_vars[out_name]
                 graph_dict[node.name] = node
 
-            subgraph.graph = graph_dict
-            subgraph.inputs = input_layer.outputs if idx > 0 else base_model.inputs
-            subgraph.outputs = slice_[-1].outputs if idx < len(node_slices) - 1 else base_model.outputs
+            subgraph.graph   = graph_dict
+            print("idx is ", idx)
+            if idx > 0:
+                subgraph.inputs = [curInputNode.outputs[0] for curInputNode in pooled_input_layer]
+            else:
+                subgraph.inputs = base_model.inputs
+            #subgraph.inputs  = [curInputNode.outputs[0] for curInputNode in pooled_input_layer] if (idx > 0) else base_model.inputs
+            print("input check ", pooled_input_layer[0].outputs)
+            print("input check ", subgraph.inputs)
+
+            pooled_outputs  = []
+            print("checking output")
+            for layer in slice_:
+                if layer.name == "relu1":
+                    print("checking relu")
+                outputIdxs = cls.analyze_input_from_slice(slice_, layer, False)
+                print(f"layer name {layer.name} : {outputIdxs}")
+                for outIdx in outputIdxs:
+                    pooled_outputs.append(layer.outputs[outIdx])
+
+            subgraph.outputs = pooled_outputs
+            # subgraph.inputs = input_layer.outputs if idx > 0 else base_model.inputs
+            # subgraph.outputs = slice_[-1].outputs if idx < len(node_slices) - 1 else base_model.outputs
+
+            print("input ---->")
+            print(subgraph.inputs)
+            print("output ---->")
+            print(subgraph.outputs)
+
             subgraph._applied_flows = base_model._applied_flows
 
             # NOTE might need to examine other subgraph-related flows (i.e., fifo_optimizer)
@@ -1116,8 +1215,21 @@ class MultiModelGraph:
                 raise ValueError(f"Split layer '{name}' not found in the model.")
             if len(node.inputs) > 1:
                 raise ValueError(f"Cannot split at layer '{name}' (multiple inputs detected).")
-            if model.graph[node.inputs[0]].class_name == 'Reshape' or node.class_name == 'Reshape':
+
+            #### quick patch fix
+
+            hostName = None
+            for key, value in model.graph.items():
+                if value.outputs[0] == node.inputs[0]:
+                    hostName = key
+
+            if model.graph[hostName].class_name == 'Reshape' or node.class_name == 'Reshape':
                 raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
+
+            print("we solve the bug")
+
+            # if model.graph[node.inputs[0]].class_name == 'Reshape' or node.class_name == 'Reshape':
+            #     raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
 
     @staticmethod
     def _create_input_node(model, next_node, kind, index):
@@ -1300,7 +1412,7 @@ class MultiModelGraph:
 
     def compile(self):
         self.write()
-        self._compile()
+        #self._compile()
 
     def predict(self, x, sim='csim'):
         if sim == 'csim':
