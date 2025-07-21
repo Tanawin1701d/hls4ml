@@ -356,7 +356,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         #     out.type.name, out.size_cpp(), out.name
                         # )  # TODO enable this
                         newline += indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrSize}]>({portName}, fout);\n'.format(
-                            actualType = out.type.name, dmaType = self.getDmaTypeName, arrSize = outIdx, portName = self.getWrapperPortName(out, False)
+                            actualType = out.type.name, dmaType = self.getDmaTypeName, arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
                         )  # TODO enable this
             elif '// hls-fpga-machine-learning insert zero' in line:
                 newline = line
@@ -385,7 +385,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         newline += (indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrIdx}]>({portName}, std::cout, true);\n'
                                     .format( actualType = out.type.name,
                                              dmaType = self.getDmaTypeName,
-                                             arrIdx = outIdx,
+                                             arrIdx = str(outIdx),
                                              portName = self.getWrapperPortName(out, False) ))
 
             elif '// hls-fpga-machine-learning insert namespace' in line:
