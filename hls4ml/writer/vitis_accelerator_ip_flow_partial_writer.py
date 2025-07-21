@@ -314,7 +314,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline = line
                 offset = 0
                 for inputIdx, inp in enumerate(model_inputs):
-                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)}\n"
+                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
                     newline += '      nnet::copy_data<float, {destype}, {offset}, N_IN[{inputIdx}]>(in, {inputPortName});\n'.format(
                         destype = self.getDmaTypeName(), offset = offset, inputIdx = str(inputIdx), inputPortName = self.getWrapperPortName(inp, True)
                     )
@@ -324,7 +324,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                     # )
                     offset += inp.size()
                 for out in model_outputs:
-                    newline += '      ' + f"hls::stream<{self.getDmaTypeName}> {self.getWrapperPortName(out, False)}\n"
+                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)}\n"
                     #newline += '      ' + out.definition_cpp() + ';\n'
             elif '// hls-fpga-machine-learning insert top-level-function' in line:
                 newline = line
@@ -356,14 +356,14 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         #     out.type.name, out.size_cpp(), out.name
                         # )  # TODO enable this
                         newline += indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrSize}]>({portName}, fout);\n'.format(
-                            actualType = out.type.name, dmaType = self.getDmaTypeName, arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
+                            actualType = out.type.name, dmaType = self.getDmaTypeName(), arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
                         )  # TODO enable this
             elif '// hls-fpga-machine-learning insert zero' in line:
                 newline = line
                 for inpIdx, inp in enumerate(model_inputs):
                     # newline += indent + inp.definition_cpp() + ';\n'
                     # newline += indent + f'nnet::fill_zero<{inp.type.name}, {inp.size_cpp()}>({inp.name});\n'
-                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)}\n"
+                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
                     newline += "        " + (f'nnet::fill_zero<{inp.type.name}, {self.getDmaTypeName()},N_INPUT[{str(inpIdx)}]>'
                                              f'({self.getWrapperPortName(inp,True)});\n')
                 for out in model_outputs:
@@ -384,7 +384,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         #     )
                         newline += (indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrIdx}]>({portName}, std::cout, true);\n'
                                     .format( actualType = out.type.name,
-                                             dmaType = self.getDmaTypeName,
+                                             dmaType = self.getDmaTypeName(),
                                              arrIdx = str(outIdx),
                                              portName = self.getWrapperPortName(out, False) ))
 
