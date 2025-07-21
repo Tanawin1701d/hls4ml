@@ -214,11 +214,11 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 ##### make input
                 newline = ''
                 inputSizeStr = "{ " + ", ".join([str(inp.size()) for inp in inps]) +  " }"
-                newline += f'static const unsigned N_IN  [{len(inps)}] = {inputSizeStr};\n'
+                newline += f'constexpr unsigned N_IN  [{len(inps)}] = {inputSizeStr};\n'
 
                 ##### make output
                 outputSizeStr = "{ " + ", ".join([str(out.size()) for out in outs]) +  " }"
-                newline += f'static const unsigned N_OUT [{len(outs)}] = {outputSizeStr};\n'
+                newline += f'constexpr unsigned N_OUT [{len(outs)}] = {outputSizeStr};\n'
                 if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
                     newline += 'typedef hls::axis<float, 0, 0, 0> dma_data_packet;\n'
                 else:
@@ -285,9 +285,6 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
     ########################################################
 
     def write_wrapper_test(self, model):
-
-        oldfile = f"{model.config.get_output_dir()}/{model.config.get_project_name()}_test.cpp"
-        newfile = f"{model.config.get_output_dir()}/{model.config.get_project_name()}_test_wrapper.cpp"
 
         filedir = os.path.dirname(os.path.abspath(__file__))
         f    = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_test.cpp'))
@@ -399,6 +396,106 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline = line
 
             fout.write(newline)
+        f.close()
+        fout.close()
+
+
+        ####################################################
+        ### write myproject_bridge.cpp #####################
+        ####################################################
+        filedir = os.path.dirname(os.path.abspath(__file__))
+        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_bridge.cpp'))
+        fout = open(f'{model.config.get_output_dir()}/{model.config.get_project_name()}_bridge.cpp', 'w')
+
+        model_inputs = model.get_input_variables()
+        model_outputs = model.get_output_variables()
+        model_brams = [var for var in model.get_weight_variables() if var.storage.lower() == 'bram']
+
+        indent = '    '
+
+        for line in f.readlines():
+            if 'MYPROJECT' in line:
+                newline = line.replace('MYPROJECT', format(model.config.get_project_name().upper()))
+
+            elif 'myproject' in line:
+                newline = line.replace('myproject', format(model.config.get_project_name()))
+
+            elif '// hls-fpga-machine-learning insert bram' in line:
+                newline = line
+                for bram in model_brams:
+                    newline += f'#include \"firmware/weights/{bram.name}.h\"\n'
+
+            elif '// hls-fpga-machine-learning insert header' in line:
+                dtype = line.split('#', 1)[1].strip()
+                inputs_str = ', '.join([f'{dtype} {i.name}[{i.size_cpp()}]' for i in model_inputs])
+                outputs_str = ', '.join([f'{dtype} {o.name}[{o.size_cpp()}]' for o in model_outputs])
+
+                newline = ''
+                newline += indent + inputs_str + ',\n'
+                newline += indent + outputs_str + '\n'
+
+            elif '// hls-fpga-machine-learning insert wrapper' in line:
+                dtype = line.split('#', 1)[1].strip()
+                newline = ''
+                for inpIdx, inp in enumerate(model_inputs): ## former is i
+                    newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(inp, True)};\n"
+                    newline += indent + f"nnet::convert_data<{dtype}, {dtype}, N_IN[{str(inpIdx)}]>({inp.name}, {self.getWrapperPortName(inp, True)});\n"
+                    # newline += indent + '{var};\n'.format(var=i.definition_cpp(name_suffix='_ap'))
+                    # newline += indent + 'nnet::convert_data<{}, {}, {}>({}, {}_ap);\n'.format(
+                    #     dtype, i.type.name, i.size_cpp(), i.name, i.name
+                    # )
+                newline += '\n'
+
+                for out in model_outputs:
+                    #newline += indent + '{var};\n'.format(var=o.definition_cpp(name_suffix='_ap'))
+                    newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(out, False)};\n"
+
+                newline += '\n'
+
+                input_vars = ','.join([self.getWrapperPortName(inp, True)for inp in model_inputs])
+                bram_vars = ','.join([b.name for b in model_brams])
+                output_vars = ','.join([self.getWrapperPortName(out, False) for out in model_outputs])
+
+                # Concatenate the input, output, and bram variables. Filter out empty/null values
+                all_vars = ','.join(filter(None, [input_vars, output_vars, bram_vars]))
+
+                top_level = indent + f'{self.getTopModelName(model)}({all_vars});\n'
+                newline += top_level
+
+                newline += '\n'
+
+                for outIdx, out in enumerate(model_outputs):
+                    # newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
+                    #     o.type.name, dtype, o.size_cpp(), o.name, o.name
+                    # )
+                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, N_OUT[{str(outIdx)}]>"
+                                         f"({self.getWrapperPortName(out, False)}, {out.name});\n")
+
+
+            elif '// hls-fpga-machine-learning insert trace_outputs' in line:
+                newline = ''
+                for layer in model.get_layers():
+                    func = layer.get_attr('function_cpp', None)
+                    if func and model.config.trace_output and layer.get_attr('trace', False):
+                        vars = layer.get_variables()
+                        for var in vars:
+                            newline += (
+                                    indent
+                                    + 'nnet::trace_outputs->insert(std::pair<std::string, void *>('
+                                    + f'"{layer.name}", (void *) malloc({var.size_cpp()} * element_size)));\n'
+                            )
+
+            elif '// hls-fpga-machine-learning insert namespace' in line:
+                newline = ''
+
+                namespace = model.config.get_writer_config().get('Namespace', None)
+                if namespace is not None:
+                    newline += indent + f'using namespace {namespace};\n'
+
+            else:
+                newline = line
+            fout.write(newline)
+
         f.close()
         fout.close()
 
