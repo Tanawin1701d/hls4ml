@@ -305,6 +305,21 @@ template <class src_T, class dst_T, size_t OFFSET, size_t SIZE> void copy_data_a
     }
 }
 
+template <class src_T, class dst_T, size_t OFFSET, size_t SIZE> void copy_data_axi_w_offset(std::vector<src_T> src, hls::stream<dst_T> &dst) {
+    assert( (OFFSET + SIZE) <= src.size());
+    for (auto i = 0; i < SIZE; i++){
+        dst_T pack;
+        pack.data = src[i + OFFSET];
+        if (i == (SIZE - 1)){
+            pack.last = 1;
+        } else {
+            pack.last = 0;
+        }
+        dst.write(pack);
+
+    }
+}
+
 template <class src_T, class dst_T, size_t SIZE> void copy_data_axi(std::vector<src_T> src, hls::stream<dst_T> &dst) {
     for (auto i = 0; i < SIZE; i++) {
         dst_T pack;
@@ -327,6 +342,7 @@ template <class res_T, size_t SIZE> void print_result(res_T result[SIZE], std::o
 
 template <class res_T, size_t SIZE, typename std::enable_if<std::is_array<res_T>::value, int>::type = 0>
 void print_result(hls::stream<res_T> &result, std::ostream &out, bool keep = false) {
+    std::cout << "from 1" << std::endl;
     for (int i = 0; i < SIZE / res_T::size; i++) {
         res_T res_pack = result.read();
         for (int j = 0; j < res_T::size; j++) {
@@ -342,6 +358,7 @@ void print_result(hls::stream<res_T> &result, std::ostream &out, bool keep = fal
 // compatible with Vitis Accelerator for res_T = hls::axis<...> and io_parallel
 template <class res_T, size_t SIZE, typename std::enable_if<!std::is_array<res_T>::value, int>::type = 0>
 void print_result(hls::stream<res_T> &result, std::ostream &out, bool keep = false) {
+    std::cout << "from 2" << std::endl;
     for (int i = 0; i < SIZE; i++) {
         res_T res_pack = result.read();
 
@@ -354,9 +371,23 @@ void print_result(hls::stream<res_T> &result, std::ostream &out, bool keep = fal
     out << std::endl;
 }
 
+template <class res_T, size_t SIZE> void print_result_for_vitis_stream(hls::stream<res_T> &result, std::ostream &out, bool keep = false) {
+    std::cout << "from x" << std::endl;
+    for (int i = 0; i < SIZE / res_T::size; i++) {
+        res_T res_pack = result.read();
+        for (int j = 0; j < res_T::size; j++) {
+            out << res_pack[j] << " ";
+        }
+        if (keep)
+            result.write(res_pack);
+    }
+    out << std::endl;
+}
+
 // compatible with Vitis Accelerator for res_T = hls::axis<underlying_data_T, ...> and io_stream
 template <class underlying_res_T, class res_T, size_t SIZE>
 void print_result(hls::stream<res_T> &result, std::ostream &out, bool keep = false) {
+    std::cout << "from 3" << std::endl;
     for (int i = 0; i < SIZE / underlying_res_T::size; i++) {
         res_T res_pack;
         for (int j = 0; j < underlying_res_T::size; j++) {
@@ -392,6 +423,18 @@ void fill_zero(hls::stream<data_T> &data) {
             data_pack.last = 1;
         } else {
             data_pack.last = 0;
+        }
+        data.write(data_pack);
+    }
+}
+
+template <class data_T, size_t SIZE> void fill_zero_wo_tlast(data_T data[SIZE]) { std::fill_n(data, SIZE, 0.); }
+
+template <class data_T, size_t SIZE> void fill_zero_wo_tlast(hls::stream<data_T> &data) {
+    for (int i = 0; i < SIZE / data_T::size; i++) {
+        data_T data_pack;
+        for (int j = 0; j < data_T::size; j++) {
+            data_pack[j] = 0.;
         }
         data.write(data_pack);
     }

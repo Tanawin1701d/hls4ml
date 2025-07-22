@@ -207,10 +207,10 @@ if {$opt(cosim)} {
     cd ${project_name}_prj/solution1/sim/verilog/
     source run_sim.tcl
     cd $old_pwd
-
+    puts "THIS IS MY BACKEND : $backend"
     set time_end [clock clicks -milliseconds]
     puts "INFO:"
-    if {[string equal "$backend" "vivadoaccelerator"] || [string equal $backend "vitisacceleratoripflow"]} {
+    if {[string equal "$backend" "vivadoaccelerator"] || [string equal $backend "vitisacceleratoripflow"] || [string equal $backend "vitisacceleratoripflowpartial"]} {
         puts [read [open ${project_name}_prj/solution1/sim/report/${project_name}_axi_cosim.rpt r]]
     } else {
         puts [read [open ${project_name}_prj/solution1/sim/report/${project_name}_cosim.rpt r]]

@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+import stat
+
 from shutil import copyfile
 
 from hls4ml.writer.vitis_accelerator_ip_flow_writer import VitisWriter
@@ -22,6 +25,15 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
     def getTopModelName(self, model):
         return f"{model.config.get_project_name()}_axi"
+    ### it is renamed for stitch layer
+    def renameType(self, tensorVar, layerIdx:int, isInput: bool):
+        return "result_" + tensorVar.type.name + f"_at_layer_{str(layerIdx)}"
+
+    def get_inputSizeArrName(self, model):
+        return "N_IN_" + model.config.get_project_name()
+
+    def get_outputSizeArrName(self, model):
+        return "N_OUT_" + model.config.get_project_name()
 
     ########################################################
     ## axi_wrapper.h & axi_wrapper.cpp  function helper ####
@@ -114,7 +126,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + "///// temp var \n"
             newline += indent + f'dma_data_packet {self.getWrapperTmpName(inps[idx], True)};\n'
             ### newline += indent + f'{inps[idx].type.name}\n'
-            newline += indent + 'for(unsigned i = 0; i < N_IN[' +str(idx) +']/' + inps[idx].type.name + '::size; ++i){\n'
+            newline += indent + f'for(unsigned i = 0; i < {self.get_inputSizeArrName(model)}[' +str(idx) +']/' + inps[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + inps[idx].type.name + ' ctype;\n'
             newline += indent + indent + 'for(unsigned j = 0; j < '+ inps[idx].type.name + '::size; ++j){\n'
             if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
@@ -144,14 +156,14 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + "///// temp var \n"
             newline += indent + f'dma_data_packet {self.getWrapperTmpName(outs[idx], False)} = {self.getWrapperTmpName(inputs[0], True)};\n'
             ####### the tmp must copy from input to prevent dma get stuck
-            newline += indent + 'for(unsigned i = 0; i < N_OUT[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
+            newline += indent + f'for(unsigned i = 0; i < {self.get_outputSizeArrName(model)}[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + outs[idx].type.name + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
             newline += indent + indent + 'for(unsigned j = 0; j < ' + outs[idx].type.name + '::size; ++j){\n'
             if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
                 newline += indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f'.data = ({out_axi_t}) (ctype[j]);\n'
                 poolLastCondition = " & ".join([self.getWrapperIsLastCnt(condIdx) for condIdx  in range(len(inputs))])
                 newline += indent + indent + indent + f"if({poolLastCondition}){{\n"
-                newline += indent + indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f".last = (((i+1)*(j+1))==N_OUT[{str(idx)}]);\n"
+                newline += indent + indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f".last = (((i+1)*(j+1))=={self.get_outputSizeArrName(model)}[{str(idx)}]);\n"
                 newline += indent + indent + indent + "}\n"
                 newline += indent + indent + indent + self.getWrapperPortName(outs[idx], False) + f'.write({self.getWrapperTmpName(outs[idx], False)});\n'
                 newline += indent + indent + "}\n"
@@ -214,11 +226,11 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 ##### make input
                 newline = ''
                 inputSizeStr = "{ " + ", ".join([str(inp.size()) for inp in inps]) +  " }"
-                newline += f'constexpr unsigned N_IN  [{len(inps)}] = {inputSizeStr};\n'
+                newline += f'constexpr unsigned {self.get_inputSizeArrName(model)}  [{len(inps)}] = {inputSizeStr};\n'
 
                 ##### make output
                 outputSizeStr = "{ " + ", ".join([str(out.size()) for out in outs]) +  " }"
-                newline += f'constexpr unsigned N_OUT [{len(outs)}] = {outputSizeStr};\n'
+                newline += f'constexpr unsigned {self.get_outputSizeArrName(model)} [{len(outs)}] = {outputSizeStr};\n'
                 if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
                     newline += 'typedef hls::axis<float, 0, 0, 0> dma_data_packet;\n'
                 else:
@@ -281,7 +293,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         fout.close()
 
     ########################################################
-    ## write test script  function helper    ###############
+    ## write test (for co simulation)/ and bridge file () script  function helper    ###############
     ########################################################
 
     def write_wrapper_test(self, model):
@@ -312,8 +324,8 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 offset = 0
                 for inputIdx, inp in enumerate(model_inputs):
                     newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
-                    newline += '      nnet::copy_data<float, {destype}, {offset}, N_IN[{inputIdx}]>(in, {inputPortName});\n'.format(
-                        destype = self.getDmaTypeName(), offset = offset, inputIdx = str(inputIdx), inputPortName = self.getWrapperPortName(inp, True)
+                    newline += '      nnet::copy_data_axi_w_offset<float, {destype}, {offset}, {inputSize}>(in, {inputPortName});\n'.format(
+                        destype = self.getDmaTypeName(), offset = offset, inputSize = str(inp.size()), inputPortName = self.getWrapperPortName(inp, True)
                     )
                     #newline += '      ' + inp.definition_cpp() + ';\n'
                     # newline += '      nnet::copy_data<float, {}, {}, {}>(in, {});\n'.format(
@@ -321,7 +333,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                     # )
                     offset += inp.size()
                 for out in model_outputs:
-                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)}\n"
+                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)};\n"
                     #newline += '      ' + out.definition_cpp() + ';\n'
             elif '// hls-fpga-machine-learning insert top-level-function' in line:
                 newline = line
@@ -340,7 +352,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline = line
                 for outIdx, out in enumerate(model_outputs):
                     #newline += indent + f'for(int i = 0; i < {out.size_cpp()}; i++) {{\n'
-                    newline += indent + f'for(int i = 0; i < N_OUT[{outIdx}]; i++) {{\n'
+                    newline += indent + f'for(int i = 0; i < {self.get_outputSizeArrName(model)}[{outIdx}]; i++) {{\n'
                     newline += indent + '  std::cout << pr[i] << " ";\n'
                     newline += indent + '}\n'
                     newline += indent + 'std::cout << std::endl;\n'
@@ -352,8 +364,8 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         # newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
                         #     out.type.name, out.size_cpp(), out.name
                         # )  # TODO enable this
-                        newline += indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrSize}]>({portName}, fout);\n'.format(
-                            actualType = out.type.name, dmaType = self.getDmaTypeName(), arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
+                        newline += indent + 'nnet::print_result<{actualType}, {dmaType}, {arrName}[{arrSize}]>({portName}, fout);\n'.format(
+                            actualType = out.type.name, dmaType = self.getDmaTypeName(), arrName = self.get_outputSizeArrName(model),arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
                         )  # TODO enable this
             elif '// hls-fpga-machine-learning insert zero' in line:
                 newline = line
@@ -361,11 +373,11 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                     # newline += indent + inp.definition_cpp() + ';\n'
                     # newline += indent + f'nnet::fill_zero<{inp.type.name}, {inp.size_cpp()}>({inp.name});\n'
                     newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
-                    newline += "        " + (f'nnet::fill_zero<{inp.type.name}, {self.getDmaTypeName()},N_INPUT[{str(inpIdx)}]>'
+                    newline += "        " + (f'nnet::fill_zero<{inp.type.name}, {self.getDmaTypeName()},{self.get_inputSizeArrName(model)}[{str(inpIdx)}]>'
                                              f'({self.getWrapperPortName(inp,True)});\n')
                 for out in model_outputs:
                     #newline += indent + out.definition_cpp() + ';\n'
-                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)}\n"
+                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)};\n"
 
             elif (
                 '// hls-fpga-machine-learning insert output' in line
@@ -379,9 +391,10 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                         #     newline += indent + 'nnet::print_result<{}, {}>({}, std::cout, {});\n'.format(
                         #         out.type.name, out.size_cpp(), out.name, keep_output
                         #     )
-                        newline += (indent + 'nnet::print_result<{actualType}, {dmaType}, N_OUT[{arrIdx}]>({portName}, std::cout, true);\n'
+                        newline += (indent + 'nnet::print_result<{actualType}, {dmaType}, {arrName}[{arrIdx}]>({portName}, std::cout, true);\n'
                                     .format( actualType = out.type.name,
                                              dmaType = self.getDmaTypeName(),
+                                             arrName = self.get_outputSizeArrName(model),
                                              arrIdx = str(outIdx),
                                              portName = self.getWrapperPortName(out, False) ))
 
@@ -439,7 +452,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline = ''
                 for inpIdx, inp in enumerate(model_inputs): ## former is i
                     newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(inp, True)};\n"
-                    newline += indent + f"nnet::convert_data<{dtype}, {dtype}, N_IN[{str(inpIdx)}]>({inp.name}, {self.getWrapperPortName(inp, True)});\n"
+                    newline += indent + f"nnet::convert_data<{dtype}, {dtype}, {self.get_inputSizeArrName(model)}[{str(inpIdx)}]>({inp.name}, {self.getWrapperPortName(inp, True)});\n"
                     # newline += indent + '{var};\n'.format(var=i.definition_cpp(name_suffix='_ap'))
                     # newline += indent + 'nnet::convert_data<{}, {}, {}>({}, {}_ap);\n'.format(
                     #     dtype, i.type.name, i.size_cpp(), i.name, i.name
@@ -468,7 +481,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                     # newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
                     #     o.type.name, dtype, o.size_cpp(), o.name, o.name
                     # )
-                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, N_OUT[{str(outIdx)}]>"
+                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {self.get_outputSizeArrName(model)}[{str(outIdx)}]>"
                                          f"({self.getWrapperPortName(out, False)}, {out.name});\n")
 
 
@@ -499,14 +512,44 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         f.close()
         fout.close()
 
-
-
     ########################################################
     ## write test script  function helper    ###############
     ########################################################
 
     def write_board_script(self, model):
-        print("[partial reconfig] we are not supporting write_board_script this yet")
+        '''
+                Write the tcl scripts and kernel sources to create a Vivado IPI project for the VitisAcceleratorIPFlow
+                '''
+        ### I am not sure yet what it is
+        # filedir = os.path.dirname(os.path.abspath(__file__))
+        # copyfile(
+        #     os.path.join(filedir, self.vitis_accelerator_ip_flow_config.get_tcl_file_path()),
+        #     f'{model.config.get_output_dir()}/design.tcl',
+        # )
+
+        ###################
+        # project.tcl
+        ###################
+        f = open(f'{model.config.get_output_dir()}/project.tcl', 'w')
+        f.write('variable project_name\n')
+        f.write(f'set project_name "{model.config.get_project_name()}"\n')
+        f.write('variable backend\n')
+        f.write('set backend "vitisacceleratoripflowpartial"\n')
+        f.write('variable part\n')
+        f.write("set part \"xc7z020clg400-1\"\n")
+        #f.write(f'set part "{self.vitis_accelerator_ip_flow_config.get_part()}"\n')
+        f.write('variable clock_period\n')
+        f.write('set clock_period {}\n'.format(model.config.get_config_value('ClockPeriod')))
+        f.write('variable clock_uncertainty\n')
+        f.write('set clock_uncertainty {}\n'.format(model.config.get_config_value('ClockUncertainty', '12.5%')))
+        f.write('variable version\n')
+        f.write('set version "{}"\n'.format(model.config.get_config_value('Version', '1.0.0')))
+        # if self.vitis_accelerator_ip_flow_config.get_interface() == 'axi_stream':
+        #     in_bit, out_bit = self.vitis_accelerator_ip_flow_config.get_io_bitwidth()
+        #     f.write(f'set bit_width_hls_output {in_bit}\n')
+        #     f.write(f'set bit_width_hls_input {out_bit}\n')
+        f.close()
+        return
 
     def write_driver(self, model):
         print("[partial reconfig] we are not supporting write_driver this yet")
@@ -555,16 +598,241 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         f.close()
         fout.close()
 
+    def write_new_tar(self, model):
+        super().write_tar(model)
+
+    def write_bridge_multigraph(self, model):
+        filedir = os.path.dirname(os.path.abspath(__file__))
+        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_bridge.cpp'))
+        fout = open(f"{model.config.get_output_dir()}/{model.config.get_project_name()}_bridge.cpp", 'w')
+        model_inputs = model.graphs[0].get_input_variables()
+        model_outputs = model.graphs[-1].get_output_variables()
+        model_brams = [var for var in model.graphs[0].get_weight_variables() if var.storage.lower() == 'bram']
+
+        indent = '    '
+
+        for line in f.readlines():
+            newline = ''
+            if 'MYPROJECT' in line:
+                newline = line.replace('MYPROJECT', format(model.config.get_project_name().upper()))
+            elif 'firmware/myproject' in line:
+                for graph_idx, g in enumerate(model.graphs):
+                    newline += '#undef DEFINES_H_\n'
+                    if len(g.outputs) == 1:
+                        newline += '#define result_t ' + 'result_graph' + str(graph_idx + 1) + '_t\n'
+                    newline += line.replace('myproject', format(model.graphs[graph_idx].config.get_project_name()))
+                    if len(g.outputs) == 1:
+                        newline += (
+                            'typedef result_graph' + str(graph_idx + 1) + '_t graph' + str(graph_idx + 1) + '_result_t;\n'
+                        )
+                        newline += '#undef result_t\n\n' if graph_idx < len(model.graphs) - 1 else '\n'
+                newline += '\n'
+            elif 'myproject' in line:
+                newline = line.replace('myproject', format(model.config.get_project_name()))
+
+            elif '// hls-fpga-machine-learning insert bram' in line:
+                newline = line
+                for bram in model_brams:
+                    newline += f'#include \"firmware/weights/{bram.name}.h\"\n'
+
+            elif '// hls-fpga-machine-learning insert header' in line:
+                dtype = line.split('#', 1)[1].strip()
+                inputs_str = ', '.join([f'{dtype} {i.name}[{i.size_cpp()}]' for i in model_inputs])
+                outputs_str = ', '.join([f'{dtype} {o.name}[{o.size_cpp()}]' for o in model_outputs])
+
+                newline = ''
+                newline += indent + inputs_str + ',\n'
+                newline += indent + outputs_str + '\n'
+
+            elif '// hls-fpga-machine-learning insert wrapper' in line:
+                dtype = line.split('#', 1)[1].strip()
+                newline = ''
+                for inp in model_inputs:
+                    newline += indent + f"hls::stream<{self.getDmaTypeName()}> " + self.getWrapperPortName(inp, True) + ";\n"
+                    newline += indent + "nnet::convert_data<{dtype}, {dtype}, {sz}>({inpRaw}, {inp_wrapper});\n".format(
+                        dtype       =dtype,
+                        sz          =str(inp.size()),
+                        inpRaw      = inp.name,
+                        inp_wrapper =self.getWrapperPortName(inp, True),
+                    )
+                    # newline += indent + '{var};\n'.format(var=i.definition_cpp(name_suffix='_ap'))
+                    # newline += indent + 'nnet::convert_data<{}, {}, {}>({}, {}_ap);\n'.format(
+                    #     dtype, i.type.name, i.size_cpp(), i.name, i.name
+                    #)
+                newline += '\n'
+
+
+                for idx, g in enumerate(model.graphs):
+                    for out in g.get_output_variables():
+                        outStreamName = self.getWrapperPortName(out, False)
+                        newline += indent + f"hls::stream<dma_data_packet> {outStreamName}(\"{outStreamName}\");\n"
+                        # definition = o.definition_cpp(name_suffix='_ap')
+                        # if len(g.outputs) == 1:
+                        #     parts = definition.split(' ', 1)
+                        #     datatype = 'graph' + str(idx + 1) + '_result_t'
+                        #     if parts[0].startswith('hls::stream'):
+                        #         modified_definition = 'hls::stream<' + datatype + '> ' + parts[1]
+                        #     else:
+                        #         modified_definition = datatype + ' ' + parts[1]
+                        #     newline += indent + f"{modified_definition};\n"
+                        # else:
+                        #     newline += indent + f"{definition};\n"
+
+                newline += '\n'
+
+                top_level = ''
+                myOutputNextInput = []
+                #output_vars = ''
+                for idx, g in enumerate(model.graphs):
+                    # if idx == 0:
+                    #     input_vars = ','.join([i.name + '_ap' for i in g.get_input_variables()])
+                    # else:
+                    #     input_vars = output_vars
+                    # bram_vars = ','.join(
+                    #     [b.name for b in [var for var in g.get_weight_variables() if var.storage.lower() == 'bram']]
+                    # )
+                    # output_vars = ','.join([o.name + '_ap' for o in g.get_output_variables()])
+                    # # Concatenate the input, output, and bram variables. Filter out empty/null values
+                    if idx == 0:
+                        input_vars = [self.getWrapperPortName(inp, True) for inp in g.get_input_variables()]
+                    else:
+                        input_vars = myOutputNextInput.copy()
+
+                    output_vars = [self.getWrapperPortName(out, False) for out in g.get_output_variables()]
+                    myOutputNextInput = output_vars.copy()
+                    bram_vars   = [b.name for b in [var for var in g.get_weight_variables() if var.storage.lower() == 'bram']]
+                    allArgs = input_vars + output_vars + bram_vars
+                    all_vars = ', '.join(allArgs)
+                    top_level += indent + f"{g.config.get_project_name()}_axi({all_vars});\n"
+                newline += top_level
+
+                newline += '\n'
+
+                for o in model_outputs:
+                    # if len(model.graphs[-1].outputs) == 1:
+                    #     newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
+                    #         datatype, dtype, o.size_cpp(), o.name, o.name
+                    #     )
+                    # else:
+                    #     newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
+                    #         o.type.name, dtype, o.size_cpp(), o.name, o.name
+                    #     )
+                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {str(o.size())}>"
+                                         f"({self.getWrapperPortName(o, False)}, {o.name});\n")
+
+            elif '// hls-fpga-machine-learning insert trace_outputs' in line:
+                newline = ''
+                for layer in model.get_layers():
+                    func = layer.get_attr('function_cpp', None)
+                    if func and model.config.trace_output and layer.get_attr('trace', False):
+                        vars = layer.get_variables()
+                        for var in vars:
+                            newline += (
+                                indent
+                                + 'nnet::trace_outputs->insert(std::pair<std::string, void *>('
+                                + f'"{layer.name}", (void *) malloc({var.size_cpp()} * element_size)));\n'
+                            )
+
+            elif '// hls-fpga-machine-learning insert namespace' in line:
+                newline = ''
+
+                namespace = model.config.get_writer_config().get('Namespace', None)
+                if namespace is not None:
+                    newline += indent + f'using namespace {namespace};\n'
+
+            elif '// hls-fpga-machine-learning insert tb_input_writer' in line:
+                funcs = [
+                    ("float", "dump_tb_inputs_float"),
+                    ("double", "dump_tb_inputs_double"),
+                ]
+                newline = ""
+                for dtype, funcname in funcs:
+                    newline += f'void {funcname}(\n'
+                    newline += '    const char* output_path'
+                    for inp in model_inputs:
+                        newline += f',\n    {dtype} {inp.name}[{inp.size_cpp()}]'
+                    newline += '\n) {\n\n'
+
+                    for inp in model_inputs:
+                        decl = inp.definition_cpp(name_suffix='_ap').strip()
+                        ap = inp.name + "_ap"
+                        if decl.startswith("hls::stream"):
+                            newline += f'    {decl};\n'
+                        else:
+                            newline += f'    {inp.type.name} {ap}[{inp.size_cpp()}];\n'
+                        newline += (
+                            f'    nnet::convert_data<{dtype}, {inp.type.name}, {inp.size_cpp()}>' f'({inp.name}, {ap});\n'
+                        )
+                    newline += "\n"
+                    newline += f'    std::ofstream fout(std::string(output_path) + "/{inp.name}_input_data.txt");\n'
+
+                    for inp in model_inputs:
+                        decl = inp.definition_cpp(name_suffix='_ap').strip()
+                        dims = inp.shape
+
+                        if decl.startswith("hls::stream"):
+                            if len(dims) == 1:
+                                N = dims[0]
+                                newline += f'    for(int i = 0; i < {N}; i++) {{\n'
+                                newline += f'        auto temp = {inp.name}_ap.read();\n'
+                                newline += (
+                                    f'        ap_uint<{inp.type.name}::value_type::width> bits = ' f'temp[0].range();\n'
+                                )
+                                newline += f'        fout << bits.to_uint()' f' << (i+1<{N} ? \' \' : \'\\n\');\n'
+                                newline += '    }\n'
+                            else:
+                                inputs_list = model.nn_config['inputs']
+                                fifo_depth = next((e['fifo_depth'] for e in inputs_list if e['name'] == inp.name), None)
+                                batch_size = next((e['batch_size'] for e in inputs_list if e['name'] == inp.name), None)
+                                newline += f'    for(int r = 0; r < {fifo_depth}; r++) {{\n'
+                                newline += f'        auto temp = {inp.name}_ap.read();\n'
+                                newline += f'        for(int c = 0; c < {batch_size}; c++) {{\n'
+                                newline += (
+                                    f'            ap_uint<{inp.type.name}::value_type::width> bits = ' f'temp[c].range();\n'
+                                )
+                                newline += (
+                                    f'            fout << bits.to_uint()' f' << (c+1<{batch_size} ? \' \' : \'\\n\');\n'
+                                )
+                                newline += '        }\n'
+                                newline += '    }\n'
+                        else:
+                            ap = inp.name + "_ap"
+                            N = inp.size_cpp()
+                            newline += f'    for(int i = 0; i < {N}; i++) {{\n'
+                            newline += f'        ap_uint<{inp.type.name}::width> bits = ' f'{ap}[i].range();\n'
+                            newline += f'        fout << bits.to_uint()' f' << (i+1<{N} ? \' \' : \'\\n\');\n'
+                            newline += '    }\n'
+                    newline += "    fout.close();\n"
+                    newline += "}\n"
+            else:
+                newline = line
+            fout.write(newline)
+
+        f.close()
+        fout.close()
+
+    ##### override stitch multigraph
     def write_build_script_multigraph(self, model):
         """Write the build script (build_lib.sh) for stitched multigraph project
         Args:
             model (MultiModelGraph): the hls4ml multigraph model.
         """
-        out = open(f'{model.config.get_output_dir()}/build_lib.sh', 'w')
-        out.close()
+        filedir = Path(__file__).parent
+        os.makedirs(model.config.get_output_dir(), exist_ok=True)
+        build_lib_src = (filedir / '../templates/vitis_accelerator_ip_flow_partial/build_lib_multigraph.sh').resolve()
+        build_lib_dst = Path(f'{model.config.get_output_dir()}/build_lib.sh').resolve()
+        graph_project_names = ' '.join(f"\"{g.config.get_output_dir().split('/')[-1]}\"" for g in model.graphs)
 
-    def write_new_tar(self, model):
-        super().write_tar(model)
+        with open(build_lib_src) as src, open(build_lib_dst, 'w') as dst:
+            for line in src.readlines():
+                line = line.replace('myproject', model.config.config['OriginalProjectName'])
+                line = line.replace('myproject_stitched', model.config.config['ProjectName'])
+                line = line.replace('mystamp', model.config.config['Stamp'])
+                line = line.replace('mygraph_name_list', graph_project_names)
+                dst.write(line)
+        os.chmod(build_lib_dst, os.stat(build_lib_dst).st_mode | stat.S_IEXEC)
+
+
 
     def write_hls(self, model, is_multigraph=False):
 
@@ -581,6 +849,9 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             self.write_axi_wrapper(model)
             self.modify_build_script(model)
             self.write_new_tar(model)
+        else:
+            self.write_bridge_multigraph(model)
+            #self.modify_write_build_script_multigraph(model)
 
 
 

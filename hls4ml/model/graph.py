@@ -1408,11 +1408,12 @@ class MultiModelGraph:
         self.nn_config = self.parse_nn_config()
         self.config.config['Stamp'] = self._make_stamp()
         # Bypass VitisWriter and invoke write_hls directly from VivadoWriter
-        super(self.backend.writer.__class__, self.backend.writer).write_hls(self, is_multigraph=True)
+        #super(self.backend.writer.__class__, self.backend.writer).write_hls(self, is_multigraph=True)
+        self.backend.writer.write_hls(self, is_multigraph=True)
 
     def compile(self):
         self.write()
-        #self._compile()
+        self._compile()
 
     def predict(self, x, sim='csim'):
         if sim == 'csim':

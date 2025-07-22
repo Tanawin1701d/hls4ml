@@ -549,6 +549,7 @@ class VivadoWriter(Writer):
                     newline += '      nnet::copy_data<float, {}, {}, {}>(in, {});\n'.format(
                         inp.type.name, offset, inp.size_cpp(), inp.name
                     )
+                    newline += f'      std::cout << "input size {inp.name}: " << {inp.name}.size() << std::endl;\n'
                     offset += inp.size()
                 for out in model_outputs:
                     newline += '      ' + out.definition_cpp() + ';\n'
@@ -557,7 +558,7 @@ class VivadoWriter(Writer):
                 newline = line
                 for inp in model_inputs:
                     newline += indent + inp.definition_cpp() + ';\n'
-                    newline += indent + f'nnet::fill_zero<{inp.type.name}, {inp.size_cpp()}>({inp.name});\n'
+                    newline += indent + f'nnet::fill_zero_wo_tlast<{inp.type.name}, {inp.size_cpp()}>({inp.name});\n'
                 for out in model_outputs:
                     newline += indent + out.definition_cpp() + ';\n'
 
@@ -588,7 +589,9 @@ class VivadoWriter(Writer):
                 tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
                 if tb_stream != 'stdout':
                     for out in model_outputs:
-                        newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
+                        newline += indent + f"std::cout << \"resultChannel {out.name}   \" << {out.name}.size() << std::endl;\n"
+                    for out in model_outputs:
+                        newline += indent + 'nnet::print_result_for_vitis_stream<{}, {}>({}, fout);\n'.format(
                             out.type.name, out.size_cpp(), out.name
                         )  # TODO enable this
 
@@ -601,7 +604,9 @@ class VivadoWriter(Writer):
                 keep_output = str(tb_stream != 'stdout').lower()  # We keep output if we need to write it to file too.
                 if tb_stream != 'file':
                     for out in model_outputs:
-                        newline += indent + 'nnet::print_result<{}, {}>({}, std::cout, {});\n'.format(
+                        newline += indent + f"std::cout << \"resultChannel {out.name}   \" << {out.name}.size() << std::endl;\n"
+                    for out in model_outputs:
+                        newline += indent + 'nnet::print_result_for_vitis_stream<{}, {}>({}, std::cout, {});\n'.format(
                             out.type.name, out.size_cpp(), out.name, keep_output
                         )
 
