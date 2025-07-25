@@ -130,7 +130,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + indent + inps[idx].type.name + ' ctype;\n'
             newline += indent + indent + 'for(unsigned j = 0; j < '+ inps[idx].type.name + '::size; ++j){\n'
             if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
-                newline += indent + indent + indent + self.getWrapperPortName(inps[idx], True) + f'.read({self.getWrapperTmpName(inps[0], True)});\n'
+                newline += indent + indent + indent + self.getWrapperPortName(inps[idx], True) + f'.read({self.getWrapperTmpName(inps[idx], True)});\n'
                 newline += indent + indent + indent + "ctype[j] = " + self.getWrapperTmpName(inps[idx], True) + ".data;\n"
                 newline += indent + indent + indent + self.getWrapperIsLastCnt(idx) + " = " + self.getWrapperTmpName(inps[idx], True) + ".last;\n"
             else:

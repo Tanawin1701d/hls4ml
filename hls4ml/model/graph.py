@@ -1061,6 +1061,12 @@ class MultiModelGraph:
                     shouldReroute = False
                     break
             if shouldReroute:
+                if isAnalyzeInput:
+                    print("reroute IN put = ", idx, " ", ioName)
+                    print("     nodeName", inspectNode.name)
+                    print("     inputs", inspectNode.inputs)
+                    print("     outputs", inspectNode.outputs)
+                    print("-----------------")
                 requiredReroute.append(idx)
 
         return requiredReroute
@@ -1113,7 +1119,7 @@ class MultiModelGraph:
             graph_dict = OrderedDict()
 
             pooled_input_layer = []
-            print("-------------- idx = ", idx)
+            print("-------------- idx = ", idx, " -----------------------------")
             if idx > 0:
                 # next_index += 1
                 # input_layer = cls._create_input_node(subgraph, slice_[0], input_layer_kind, next_index)
@@ -1135,10 +1141,15 @@ class MultiModelGraph:
                 ###### grouping it
                 rerouteGrp = cls.group_for_creating_new_io(requiredReroute, True)
 
+
+                ######### rerouteGrp { "ioName" : [(inputIdx, Node), ....]}
                 ###### create the node and rerouting it
 
                 for ioName, nodeUpdateList in rerouteGrp.items():
-                    input_layer = cls._create_input_node(subgraph, nodeUpdateList[0][1], input_layer_kind, next_index)
+                    ###### nodeUpdateList[0][1] is the sample Node (Layer) that must be inject to the system
+                    input_layer = cls._create_input_node(subgraph, nodeUpdateList[0][1],
+                                                         input_layer_kind, next_index,
+                                                         next_node_portName=ioName)
                     pooled_input_layer.append(input_layer)
                     graph_dict[input_layer.name] = input_layer
                     print("added name is ", input_layer.name )
@@ -1147,6 +1158,7 @@ class MultiModelGraph:
 
                     next_index += 1
                     for node_idx, node in nodeUpdateList:
+                        ###### reroute src data to be the src of the new input layer
                         node.inputs[node_idx] = input_layer.outputs[0]
 
             else:
@@ -1232,17 +1244,17 @@ class MultiModelGraph:
             #     raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
 
     @staticmethod
-    def _create_input_node(model, next_node, kind, index):
+    def _create_input_node(model, next_node, kind, index, next_node_portName = None):
         layer_name = f'{next_node.name}_input'
         attrs = {
             'name': layer_name,
             'class_name': kind,
             'data_format': 'channels_last',
-            'input_shape': next_node.get_input_variable().shape,
+            'input_shape': next_node.get_input_variable(next_node_portName).shape,
         }
         model.index = index
         node = model.make_node(kind, layer_name, attrs, [layer_name], [layer_name], initialize=True)
-        model.output_vars[layer_name].type.precision = next_node.get_input_variable().type.precision
+        model.output_vars[layer_name].type.precision = next_node.get_input_variable(next_node_portName).type.precision
         return node
 
     def _initialize_config(self, first_graph):

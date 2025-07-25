@@ -21,4 +21,8 @@ mytest2/*
 mytest3/*
 mytest4/*
 myTest5_simtest/*
+myTest6_cosim/*
+myTest7_cosimpar/*
+myTest8_skipTest/*
+myTest9_skipOnnx/*
 environment.yml
