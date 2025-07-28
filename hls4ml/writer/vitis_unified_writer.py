@@ -4,13 +4,13 @@ import stat
 
 from shutil import copyfile
 
-from hls4ml.writer.vitis_accelerator_ip_flow_writer import VitisWriter
+from hls4ml.writer.vitis_writer import VitisWriter
 
-class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
+class VitisUnifiedWriter(VitisWriter):
 
     def __init__(self):
         super().__init__()
-        self.vitis_accelerator_ip_flow_partial_config = None
+        self.vitis_unified_config = None
 
     #######################################################
     ## naming of variable function helper #################
@@ -64,7 +64,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         return newline
     ##### content in axi_wrapper.cpp
     def write_axi_wrapper_interface(self, model, inps, outs):
-        if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+        if self.vitis_unified_config.get_interface() == 'axi_stream':
             newline = ''
             indent = "      "
             for inp in inps:
@@ -78,14 +78,14 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                     newline += indent + '#pragma HLS DATAFLOW\n'
             return newline
         else:
-            raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ interface retriever")
+            raise Exception("vitis_unified supports only axi_stream @ interface retriever")
 
     def write_axi_local_vars(self, model, inps, outs):
 
         ####### build local stream variable
 
         newline = '///// wrinting local stream vars /////\n'
-        if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+        if self.vitis_unified_config.get_interface() == 'axi_stream':
             indent = "      "
             ##### loop to build local stream to send data into the system
             newline += '///////// build input vars ///////////\n'
@@ -111,7 +111,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline += indent + f'#pragma HLS STREAM variable={portname} depth={model.get_output_variables()[outIdx].pragma[1]}\n'
 
         else:
-            raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ local vars")
+            raise Exception("vitis_unified supports only axi_stream @ local vars")
 
 
         return newline
@@ -129,12 +129,12 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + f'for(unsigned i = 0; i < {self.get_inputSizeArrName(model)}[' +str(idx) +']/' + inps[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + inps[idx].type.name + ' ctype;\n'
             newline += indent + indent + 'for(unsigned j = 0; j < '+ inps[idx].type.name + '::size; ++j){\n'
-            if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+            if self.vitis_unified_config.get_interface() == 'axi_stream':
                 newline += indent + indent + indent + self.getWrapperPortName(inps[idx], True) + f'.read({self.getWrapperTmpName(inps[idx], True)});\n'
                 newline += indent + indent + indent + "ctype[j] = " + self.getWrapperTmpName(inps[idx], True) + ".data;\n"
                 newline += indent + indent + indent + self.getWrapperIsLastCnt(idx) + " = " + self.getWrapperTmpName(inps[idx], True) + ".last;\n"
             else:
-                raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ each enqueue")
+                raise Exception("vitis_unified supports only axi_stream @ each enqueue")
 
             newline += indent + indent + '}\n'
             newline += indent + indent + self.getWrapperPortNameLocal(inps[idx], True) + ".write(ctype);\n"
@@ -142,7 +142,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + self.getWrapperTmpName(inps[idx], True) + ".last = 0;\n"
 
         else:
-            raise Exception("vitis_accelerator_ip_flow_partial supports only io_stream @ each enqueue")
+            raise Exception("vitis_unified supports only io_stream @ each enqueue")
 
         return newline
 
@@ -159,7 +159,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
             newline += indent + f'for(unsigned i = 0; i < {self.get_outputSizeArrName(model)}[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + outs[idx].type.name + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
             newline += indent + indent + 'for(unsigned j = 0; j < ' + outs[idx].type.name + '::size; ++j){\n'
-            if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+            if self.vitis_unified_config.get_interface() == 'axi_stream':
                 newline += indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f'.data = ({out_axi_t}) (ctype[j]);\n'
                 poolLastCondition = " & ".join([self.getWrapperIsLastCnt(condIdx) for condIdx  in range(len(inputs))])
                 newline += indent + indent + indent + f"if({poolLastCondition}){{\n"
@@ -170,9 +170,9 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline += indent + "}\n"
                 newline += indent + self.getWrapperTmpName(outs[idx], False) + ".last = 0;\n"
             else:
-                raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream @ each dequeue")
+                raise Exception("vitis_unified supports only axi_stream @ each dequeue")
         else:
-            raise Exception("vitis_accelerator_ip_flow_partial supports only io_stream @ each dequeue")
+            raise Exception("vitis_unified supports only io_stream @ each dequeue")
 
         return newline
 
@@ -195,7 +195,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         '''
             We we want to have multi io system
         '''
-        inp_axi_t, out_axi_t, inps, outs = self.vitis_accelerator_ip_flow_partial_config.get_corrected_types()
+        inp_axi_t, out_axi_t, inps, outs = self.vitis_unified_config.get_corrected_types()
         indent = '    '
 
         print("------------------------------- input write wrapper is -------------------------")
@@ -210,7 +210,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         # myproject_axi.h
         ######################
         filedir = os.path.dirname(os.path.abspath(__file__))
-        f       = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_axi.h'))
+        f       = open(os.path.join(filedir, '../templates/vitis_unified/myproject_axi.h'))
         fout    = open(f'{model.config.get_output_dir()}/firmware/{model.config.get_project_name()}_axi.h', 'w')
 
         for line in f.readlines():
@@ -231,17 +231,17 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 ##### make output
                 outputSizeStr = "{ " + ", ".join([str(out.size()) for out in outs]) +  " }"
                 newline += f'constexpr unsigned {self.get_outputSizeArrName(model)} [{len(outs)}] = {outputSizeStr};\n'
-                if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+                if self.vitis_unified_config.get_interface() == 'axi_stream':
                     newline += 'typedef hls::axis<float, 0, 0, 0> dma_data_packet;\n'
                 else:
                     newline += f'typedef {inp_axi_t} input_axi_t;\n'
                     newline += f'typedef {out_axi_t} output_axi_t;\n'
             elif '// hls-fpga-machine-learning insert multi-io' in line:
                 newline = ''
-                if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+                if self.vitis_unified_config.get_interface() == 'axi_stream':
                     newline += self.write_axi_wrapper_io(inps, outs)
                 else:
-                    raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream")
+                    raise Exception("vitis_unified supports only axi_stream")
 
             else:
                 newline = line
@@ -255,7 +255,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         ######################
         # myproject_axi.cpp
         ######################
-        f     = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_axi.cpp'))
+        f     = open(os.path.join(filedir, '../templates/vitis_unified/myproject_axi.cpp'))
         fout  = open(f'{model.config.get_output_dir()}/firmware/{model.config.get_project_name()}_axi.cpp', 'w')
 
         io_type = model.config.get_config_value("IOType")
@@ -267,10 +267,10 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
                 newline = f'#include "{model.config.get_project_name()}_axi.h"\n'
             elif '// hls-fpga-machine-learning insert multiIo' in line:
                 newline = ''
-                if self.vitis_accelerator_ip_flow_partial_config.get_interface() == 'axi_stream':
+                if self.vitis_unified_config.get_interface() == 'axi_stream':
                     newline += self.write_axi_wrapper_io(inps, outs)
                 else:
-                    raise Exception("vitis_accelerator_ip_flow_partial supports only axi_stream")
+                    raise Exception("vitis_unified supports only axi_stream")
             elif '// hls-fpga-machine-learning insert interface' in line:
                 newline = self.write_axi_wrapper_interface(model, inps, outs)
             elif '// hls-fpga-machine-learning insert local vars' in line:
@@ -299,7 +299,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
     def write_wrapper_test(self, model):
 
         filedir = os.path.dirname(os.path.abspath(__file__))
-        f    = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_test.cpp'))
+        f    = open(os.path.join(filedir, '../templates/vitis_unified/myproject_test.cpp'))
         fout = open(f'{model.config.get_output_dir()}/{model.config.get_project_name()}_test.cpp', 'w')
 
         model_inputs  = model.get_input_variables()
@@ -417,7 +417,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         ### write myproject_bridge.cpp #####################
         ####################################################
         filedir = os.path.dirname(os.path.abspath(__file__))
-        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_bridge.cpp'))
+        f = open(os.path.join(filedir, '../templates/vitis_unified/myproject_bridge.cpp'))
         fout = open(f'{model.config.get_output_dir()}/{model.config.get_project_name()}_bridge.cpp', 'w')
 
         model_inputs = model.get_input_variables()
@@ -587,7 +587,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         # build_lib.sh
         ###################
 
-        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/build_lib.sh'))
+        f = open(os.path.join(filedir, '../templates/vitis_unified/build_lib.sh'))
         fout = open(f'{model.config.get_output_dir()}/build_lib.sh', 'w')
 
         for line in f.readlines():
@@ -603,7 +603,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
     def write_bridge_multigraph(self, model):
         filedir = os.path.dirname(os.path.abspath(__file__))
-        f = open(os.path.join(filedir, '../templates/vitis_accelerator_ip_flow_partial/myproject_bridge.cpp'))
+        f = open(os.path.join(filedir, '../templates/vitis_unified/myproject_bridge.cpp'))
         fout = open(f"{model.config.get_output_dir()}/{model.config.get_project_name()}_bridge.cpp", 'w')
         model_inputs = model.graphs[0].get_input_variables()
         model_outputs = model.graphs[-1].get_output_variables()
@@ -811,6 +811,46 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         f.close()
         fout.close()
 
+    def write_build_script(self, model):
+        filedir = Path(__file__).parent
+        ##### we require vitis unified not
+        super().write_build_script(model)
+
+
+        # build_prj.tcl (lagacy unused)
+        srcpath = (filedir / '../templates/vitis_unified/build_prj.tcl').resolve()
+        dstpath = f'{model.config.get_output_dir()}/build_prj.tcl'
+        copyfile(srcpath, dstpath)
+
+        #### we build 3 config file for hls_config.cfg/hls_config_cosim.cfg/hls_config_csim.cfg
+
+        for configType in ["hls_config.cfg","hls_config_cosim.cfg","hls_config_csim.cfg"]:
+            # hls_config.cfg
+            srcpath = (filedir / '../templates/vitis_unified/hls_config.cfg').resolve()
+            despath = f'{model.config.get_output_dir()}/{configType}'
+            df      = open(despath, 'w')
+            with open(srcpath, 'r') as sf:
+                lines = sf.readlines()
+            for line in lines:
+                if "{PART}" in line:
+                    line = line.replace("{PART}", self.vitis_unified_config.get_part())
+                if "{CLK}" in line:
+                    line = line.replace("{CLK}", str(model.config.get_config_value('ClockPeriod')))
+                if "{OUTDIR}" in line:
+                    line = line.replace("{OUTDIR}", model.config.get_output_dir())
+                if "{CLK_UC}" in line:
+                    line = line.replace("{CLK_UC}", model.config.get_config_value('ClockUncertainty', '12.5%'))
+                if "{PRJ_NAME}" in line:
+                    line = line.replace("{PRJ_NAME}", model.config.get_project_name())
+                if "{TOP_NAME}" in line:
+                    line = line.replace("{TOP_NAME}", model.config.get_project_name() + "_axi")
+                if ("-DRTL_SIM" in line) and (configType != "hls_config_cosim.cfg"):
+                    line = ""
+
+                df.write(line)
+            df.close()
+
+
     ##### override stitch multigraph
     def write_build_script_multigraph(self, model):
         """Write the build script (build_lib.sh) for stitched multigraph project
@@ -819,7 +859,7 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
         """
         filedir = Path(__file__).parent
         os.makedirs(model.config.get_output_dir(), exist_ok=True)
-        build_lib_src = (filedir / '../templates/vitis_accelerator_ip_flow_partial/build_lib_multigraph.sh').resolve()
+        build_lib_src = (filedir / '../templates/vitis_unified/build_lib_multigraph.sh').resolve()
         build_lib_dst = Path(f'{model.config.get_output_dir()}/build_lib.sh').resolve()
         graph_project_names = ' '.join(f"\"{g.config.get_output_dir().split('/')[-1]}\"" for g in model.graphs)
 
@@ -836,9 +876,9 @@ class VitisAcceleratorIPFlowPartialWriter(VitisWriter):
 
     def write_hls(self, model, is_multigraph=False):
 
-        from hls4ml.backends import VitisACIPFlowParConfig
+        from hls4ml.backends import VitisUnifiedConfig
 
-        self.vitis_accelerator_ip_flow_partial_config = VitisACIPFlowParConfig(
+        self.vitis_unified_config = VitisUnifiedConfig(
             model.config, model.get_input_variables(), model.get_output_variables()
         )
         super().write_hls(model, is_multigraph=is_multigraph)
