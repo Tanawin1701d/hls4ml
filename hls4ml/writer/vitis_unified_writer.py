@@ -35,6 +35,13 @@ class VitisUnifiedWriter(VitisWriter):
     def get_outputSizeArrName(self, model):
         return "N_OUT_" + model.config.get_project_name()
 
+    def get_axi_wrapper_type(self, tensorVar):
+        return f"{tensorVar.type.name}_packet"
+
+    def get_axi_wrapper_dec(self, tensorVar):
+        return f"typedef hls::axis<{tensorVar.type.name}, 0,0,0, AXIS_ENABLE_LAST> {self.get_axi_wrapper_type(tensorVar)};"
+
+
     ########################################################
     ## axi_wrapper.h & axi_wrapper.cpp  function helper ####
     ########################################################
@@ -54,9 +61,11 @@ class VitisUnifiedWriter(VitisWriter):
         inputList = []
         outputList = []
         for inp in inps:
-            inputList.append(f'hls::stream<dma_data_packet>& {self.getWrapperPortName(inp, True)}')
+            streamType = self.get_axi_wrapper_type(inp) if self.vitis_unified_config.isFreeInterimInput() else "dma_data_packet"
+            inputList.append(f'hls::stream<{streamType}>& {self.getWrapperPortName(inp, True)}')
         for out in outs:
-            outputList.append(f'hls::stream<dma_data_packet> & {self.getWrapperPortName(out, False)}')
+            streamType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else "dma_data_packet"
+            outputList.append(f'hls::stream<{streamType}> & {self.getWrapperPortName(out, False)}')
 
         if len(inputList) == 0 or len(outputList) == 0:
             raise Exception("No input or output stream found")
@@ -125,6 +134,7 @@ class VitisUnifiedWriter(VitisWriter):
             newline += '////////////// enqueue number ' + str(idx) + ' //////////////\n'
             newline += indent + "///// temp var \n"
             newline += indent + f'dma_data_packet {self.getWrapperTmpName(inps[idx], True)};\n'
+            newline += indent + f"{self.getWrapperTmpName(inps[idx], True)}.last = 0;\n"
             ### newline += indent + f'{inps[idx].type.name}\n'
             newline += indent + f'for(unsigned i = 0; i < {self.get_inputSizeArrName(model)}[' +str(idx) +']/' + inps[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + inps[idx].type.name + ' ctype;\n'
@@ -146,6 +156,29 @@ class VitisUnifiedWriter(VitisWriter):
 
         return newline
 
+    def write_free_axi_wrapper_each_enqueue(self, model, inps, idx):
+        io_type = model.config.get_config_value("IOType")
+        indent = "      "
+        newline = "\n\n\n"
+        if io_type == 'io_stream':
+            newline += '////////////// enqueue number ' + str(idx) + ' //////////////\n'
+            newline += indent + "///// temp var \n"
+            newline += indent + f'{self.get_axi_wrapper_type(inps[idx])} {self.getWrapperTmpName(inps[idx], True)};\n'
+            newline += indent + f"{self.getWrapperTmpName(inps[idx], True)}.last = 0;\n"
+            newline += indent + f'for(unsigned i = 0; i < {self.get_inputSizeArrName(model)}[' + str(idx) + ']/' + inps[
+                idx].type.name + '::size; ++i){\n'
+            newline += indent + indent + inps[idx].type.name + ' ctype;\n'
+            newline += indent + indent + self.getWrapperPortName(inps[idx], True) + f'.read({self.getWrapperTmpName(inps[idx], True)});\n'
+            newline += indent + indent + "ctype = " + self.getWrapperTmpName(inps[idx], True) + ".data;\n"
+            newline += indent + indent + self.getWrapperIsLastCnt(idx) + " = " + self.getWrapperTmpName(inps[idx], True) + ".last;\n"
+            newline += indent + indent + self.getWrapperPortNameLocal(inps[idx], True) + ".write(ctype);\n"
+            newline += indent + '}\n'
+            newline += indent + self.getWrapperTmpName(inps[idx], True) + ".last = 0;\n"
+        else:
+            raise Exception("vitis_unified supports only io_stream @ each free axi enqueue")
+
+        return newline
+
     def write_axi_wrapper_dequeue(self, model, inputs, outs, idx, out_axi_t):
 
         io_type = model.config.get_config_value("IOType")
@@ -154,7 +187,8 @@ class VitisUnifiedWriter(VitisWriter):
         if io_type == 'io_stream':
             newline += '////////////// dequeue number ' + str(idx) + ' //////////////\n'
             newline += indent + "///// temp var \n"
-            newline += indent + f'dma_data_packet {self.getWrapperTmpName(outs[idx], False)} = {self.getWrapperTmpName(inputs[0], True)};\n'
+            newline += indent + f'dma_data_packet {self.getWrapperTmpName(outs[idx], False)};\n'
+            newline += indent + f"{self.getWrapperTmpName(outs[idx], False)}.last = 0;\n"
             ####### the tmp must copy from input to prevent dma get stuck
             newline += indent + f'for(unsigned i = 0; i < {self.get_outputSizeArrName(model)}[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
             newline += indent + indent + outs[idx].type.name + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
@@ -171,6 +205,31 @@ class VitisUnifiedWriter(VitisWriter):
                 newline += indent + self.getWrapperTmpName(outs[idx], False) + ".last = 0;\n"
             else:
                 raise Exception("vitis_unified supports only axi_stream @ each dequeue")
+        else:
+            raise Exception("vitis_unified supports only io_stream @ each dequeue")
+
+        return newline
+
+    def write_free_axi_wrapper_dequeue(self, model, inputs, outs, idx, out_axi_t):
+
+        io_type = model.config.get_config_value("IOType")
+        indent = "      "
+        newline = "\n\n\n"
+        if io_type == 'io_stream':
+            newline += '////////////// dequeue number ' + str(idx) + ' //////////////\n'
+            newline += indent + "///// temp var \n"
+            newline += indent + f'{self.get_axi_wrapper_type(outs[idx])} {self.getWrapperTmpName(outs[idx], False)};\n'
+            newline += indent + f"{self.getWrapperTmpName(outs[idx], False)}.last = 0;\n"
+            ####### the tmp must copy from input to prevent dma get stuck
+            newline += indent + f'for(unsigned i = 0; i < {self.get_outputSizeArrName(model)}[' +str(idx) +']/' + outs[idx].type.name + '::size; ++i){\n'
+            newline += indent + indent + outs[idx].type.name + ' ctype = ' + self.getWrapperPortNameLocal(outs[idx], False) + '.read();\n'
+            newline += indent + indent + self.getWrapperTmpName(outs[idx], False) + ".data = ctype;\n"
+            poolLastCondition = " & ".join([self.getWrapperIsLastCnt(condIdx) for condIdx in range(len(inputs))])
+            newline += indent + indent + f"if({poolLastCondition}){{\n"
+            newline += indent + indent + indent + self.getWrapperTmpName(outs[idx], False) + f".last = ((i+1) == ({self.get_outputSizeArrName(model)}[{str(idx)}] / {outs[idx].type.name + '::size'} ));\n"
+            newline += indent + indent + "}\n"
+            newline += indent + indent + self.getWrapperPortName(outs[idx],False) + f'.write({self.getWrapperTmpName(outs[idx], False)});\n'
+            newline += indent + "}\n"
         else:
             raise Exception("vitis_unified supports only io_stream @ each dequeue")
 
@@ -232,10 +291,18 @@ class VitisUnifiedWriter(VitisWriter):
                 outputSizeStr = "{ " + ", ".join([str(out.size()) for out in outs]) +  " }"
                 newline += f'constexpr unsigned {self.get_outputSizeArrName(model)} [{len(outs)}] = {outputSizeStr};\n'
                 if self.vitis_unified_config.get_interface() == 'axi_stream':
-                    newline += 'typedef hls::axis<float, 0, 0, 0> dma_data_packet;\n'
+                    newline += 'typedef hls::axis<float, 0, 0, 0, AXIS_ENABLE_LAST> dma_data_packet;\n'
                 else:
                     newline += f'typedef {inp_axi_t} input_axi_t;\n'
                     newline += f'typedef {out_axi_t} output_axi_t;\n'
+                #### incase the io is interim input
+                if self.vitis_unified_config.isFreeInterimInput():
+                    for inp in inps:
+                        newline += self.get_axi_wrapper_dec(inp) + "\n"
+                #### incase the io is interim output
+                if self.vitis_unified_config.isFreeInterimOutput():
+                    for out in outs:
+                        newline += self.get_axi_wrapper_dec(out) + "\n"
             elif '// hls-fpga-machine-learning insert multi-io' in line:
                 newline = ''
                 if self.vitis_unified_config.get_interface() == 'axi_stream':
@@ -277,15 +344,23 @@ class VitisUnifiedWriter(VitisWriter):
                 newline = self.write_axi_local_vars(model, inps, outs)
             elif '// hls-fpga-machine-learning insert enqueue' in line:
                 newline = ''
-                for idx, inp in enumerate(inps):
-                    newline += self.write_axi_wrapper_each_enqueue(model, inps, idx) + '\n'
+                if self.vitis_unified_config.isFreeInterimInput():
+                    for idx, inp in enumerate(inps):
+                        newline += self.write_free_axi_wrapper_each_enqueue(model, inps, idx) + '\n'
+                else:
+                    for idx, inp in enumerate(inps):
+                        newline += self.write_axi_wrapper_each_enqueue(model, inps, idx) + '\n'
             elif '// hls-fpga-machine-learning insert call' in line:
                 newline = '////// call the main variable\n'
                 newline += self.write_axi_wrapper_insert_call(model, inps, outs)
             elif '// hls-fpga-machine-learning insert dequeue' in line:
                 newline = ''
-                for idx, out in enumerate(outs):
-                    newline += self.write_axi_wrapper_dequeue(model, inps, outs, idx, out_axi_t)
+                if self.vitis_unified_config.isFreeInterimOutput():
+                    for idx, out in enumerate(outs):
+                        newline += self.write_free_axi_wrapper_dequeue(model, inps, outs, idx, out_axi_t)
+                else:
+                    for idx, out in enumerate(outs):
+                        newline += self.write_axi_wrapper_dequeue(model, inps, outs, idx, out_axi_t)
             else:
                 newline = line
             fout.write(newline)
@@ -835,7 +910,7 @@ class VitisUnifiedWriter(VitisWriter):
                 if "{PART}" in line:
                     line = line.replace("{PART}", self.vitis_unified_config.get_part())
                 if "{CLK}" in line:
-                    line = line.replace("{CLK}", str(model.config.get_config_value('ClockPeriod')))
+                    line = line.replace("{CLK}", model.config.get_config_value('ClockPeriod'))
                 if "{OUTDIR}" in line:
                     line = line.replace("{OUTDIR}", model.config.get_output_dir())
                 if "{CLK_UC}" in line:

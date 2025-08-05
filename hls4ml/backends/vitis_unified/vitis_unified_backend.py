@@ -184,8 +184,16 @@ class VitisUnifiedBackend(VitisBackend):
         driver='python',
         input_type='float',
         output_type='float',
+        input_interim_type='io_stream',    #### it should be io_stream or io_free_stream/ io_stream
+        output_interim_type='io_stream'
     ):
         board = board if board is not None else 'pynq-z2'
+
+        if input_interim_type not in ['io_free_stream', 'io_stream']:
+            raise Exception(f'input_interim_type should be io_free_stream or io_stream, but got {input_interim_type}')
+        if output_interim_type not in ['io_free_stream', 'io_stream']:
+            raise Exception(f'output_interim_type should be io_free_stream or io_stream, but got {output_interim_type}')
+
         config = super().create_initial_config(part, clock_period, clock_uncertainty, io_type)
         config['AcceleratorConfig'] = {}
         config['AcceleratorConfig']['Board'] = board
@@ -196,6 +204,11 @@ class VitisUnifiedBackend(VitisBackend):
         config['AcceleratorConfig']['Precision']['Output'] = {}
         config['AcceleratorConfig']['Precision']['Input'] = input_type  # float, double or ap_fixed<a,b>
         config['AcceleratorConfig']['Precision']['Output'] = output_type  # float, double or ap_fixed<a,b>
+
+        config['MultiGraphConfig'] = {}
+        config['MultiGraphConfig']['IOInterimType'] = {}
+        config['MultiGraphConfig']['IOInterimType']['Input'] = input_interim_type
+        config['MultiGraphConfig']['IOInterimType']['Output'] = output_interim_type
 
         return config
 

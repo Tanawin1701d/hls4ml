@@ -1091,7 +1091,7 @@ class MultiModelGraph:
 
 
     @classmethod
-    def from_model_graph(cls, base_model: ModelGraph, split_before_layers: list[str]):
+    def from_model_graph(cls, base_model: ModelGraph, split_before_layers: list[str], free_axi_interim: bool = False):
         """
         Create a MultiModelGraph by splitting a base ModelGraph at specified layer names,
         each initiating a subgraph.
@@ -1112,8 +1112,24 @@ class MultiModelGraph:
         for idx, slice_ in enumerate(node_slices):
             cfg_copy = copy.copy(base_model.config)
             cfg_copy.config = copy.copy(base_model.config.config)
+            if 'MultiGraphConfig' in base_model.config.config:
+                cfg_copy.config['MultiGraphConfig'] = copy.deepcopy(base_model.config.config.get('MultiGraphConfig', {}))
             cfg_copy.config['ProjectName'] = f'{base_model.config.get_project_name()}_graph{idx + 1}'
             cfg_copy.config['OutputDir'] = os.path.join(base_model.config.get_output_dir(), f'graph{idx + 1}')
+
+            ###### interim reconfiguration
+            if free_axi_interim:
+                print(id(cfg_copy.config['MultiGraphConfig']))
+                if idx != 0:
+                    if "MultiGraphConfig" not in cfg_copy.config:
+                        print("warning: MultiGraphConfig not found in config")
+                    else:
+                        cfg_copy.config['MultiGraphConfig']['IOInterimType']['Input'] = "io_free_stream"
+                if idx != (len(node_slices)-1):
+                    if "MultiGraphConfig" not in cfg_copy.config:
+                        print("warning: MultiGraphConfig not found in config")
+                    else:
+                        cfg_copy.config['MultiGraphConfig']['IOInterimType']['Output'] = "io_free_stream"
 
             subgraph = base_model.__class__(cfg_copy, inputs=[], outputs=[])
             graph_dict = OrderedDict()
@@ -1225,8 +1241,8 @@ class MultiModelGraph:
             node = model.graph[name]
             if name not in model_layers:
                 raise ValueError(f"Split layer '{name}' not found in the model.")
-            if len(node.inputs) > 1:
-                raise ValueError(f"Cannot split at layer '{name}' (multiple inputs detected).")
+            # if len(node.inputs) > 1:
+            #     raise ValueError(f"Cannot split at layer '{name}' (multiple inputs detected).")
 
             #### quick patch fix
 
@@ -1591,7 +1607,7 @@ class MultiModelGraph:
                 print(f'Error copying hls4ml logo to {g.config.get_output_dir()} project: {e}')
 
 
-def to_multi_model_graph(model: ModelGraph, split_before_layers: list[str]):
+def to_multi_model_graph(model: ModelGraph, split_before_layers: list[str], free_axi_size_interim = False):
     """
     Create a MultiModelGraph by splitting a base ModelGraph before the specified layer names.
 
@@ -1603,4 +1619,4 @@ def to_multi_model_graph(model: ModelGraph, split_before_layers: list[str]):
     Returns:
         multi_model_graph (MultiModelGraph): the partitioned multi model graph
     """
-    return MultiModelGraph.from_model_graph(model, split_before_layers)
+    return MultiModelGraph.from_model_graph(model, split_before_layers, free_axi_size_interim)

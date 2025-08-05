@@ -27,4 +27,5 @@ myTest8_skipTest/*
 myTest9_skipOnnx/*
 myTest10_bdk/*
 myTest11_vitisUnified/*
+myTest12_skipper/*
 environment.yml
