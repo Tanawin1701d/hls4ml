@@ -1117,7 +1117,10 @@ class MultiModelGraph:
             cfg_copy.config['ProjectName'] = f'{base_model.config.get_project_name()}_graph{idx + 1}'
             cfg_copy.config['OutputDir'] = os.path.join(base_model.config.get_output_dir(), f'graph{idx + 1}')
 
+
             ###### interim reconfiguration
+            ########### for intermediate port the backend shall allow the config to allow the io port to be raw data output
+            ########### the floating point conversion should be suppressed
             if free_axi_interim:
                 print(id(cfg_copy.config['MultiGraphConfig']))
                 if idx != 0:
@@ -1154,18 +1157,22 @@ class MultiModelGraph:
                     for changeIdx in nodeInputChangeList:
                         requiredReroute.append((changeIdx, checkingNode))
 
-                ###### grouping it
+                ###### grouping it, incase the io have been reused many time
                 rerouteGrp = cls.group_for_creating_new_io(requiredReroute, True)
-
+                print("rerouteGrp = ", rerouteGrp)
 
                 ######### rerouteGrp { "ioName" : [(inputIdx, Node), ....]}
                 ###### create the node and rerouting it
 
+                namedNewInputLayer = dict()
                 for ioName, nodeUpdateList in rerouteGrp.items():
                     ###### nodeUpdateList[0][1] is the sample Node (Layer) that must be inject to the system
-                    input_layer = cls._create_input_node(subgraph, nodeUpdateList[0][1],
+                    input_layer = cls._create_input_node(subgraph, nodeUpdateList[0][1], #### list of (inputIdx, Node)
                                                          input_layer_kind, next_index,
-                                                         next_node_portName=ioName)
+                                                         next_node_portName=ioName,
+                                                         namedNewInputLayer = namedNewInputLayer)
+                    if (idx == 3):
+                        print("den")
                     pooled_input_layer.append(input_layer)
                     graph_dict[input_layer.name] = input_layer
                     print("added name is ", input_layer.name )
@@ -1260,8 +1267,17 @@ class MultiModelGraph:
             #     raise ValueError(f"Cannot split at '{name}': Reshape layer found in this or previous layer.")
 
     @staticmethod
-    def _create_input_node(model, next_node, kind, index, next_node_portName = None):
+    def _create_input_node(model, next_node, kind, index, next_node_portName = None, namedNewInputLayer = None):
         layer_name = f'{next_node.name}_input'
+
+        if (namedNewInputLayer is not None):
+            if layer_name in namedNewInputLayer:
+                newLayerName = layer_name + "_" + str(namedNewInputLayer[layer_name])
+                namedNewInputLayer[layer_name] = namedNewInputLayer[layer_name] + 1
+                layer_name = newLayerName
+            else:
+                namedNewInputLayer[layer_name] = 0
+
         attrs = {
             'name': layer_name,
             'class_name': kind,

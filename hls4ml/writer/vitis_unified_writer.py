@@ -398,18 +398,29 @@ class VitisUnifiedWriter(VitisWriter):
                 newline = line
                 offset = 0
                 for inputIdx, inp in enumerate(model_inputs):
-                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
-                    newline += '      nnet::copy_data_axi_w_offset<float, {destype}, {offset}, {inputSize}>(in, {inputPortName});\n'.format(
-                        destype = self.getDmaTypeName(), offset = offset, inputSize = str(inp.size()), inputPortName = self.getWrapperPortName(inp, True)
+                    streamPktType = self.get_axi_wrapper_type(inp) if self.vitis_unified_config.isFreeInterimInput() else self.getDmaTypeName()
+
+                    newline += "      hls::stream<{desType}> {inputPortName};\n".format(
+                        desType = streamPktType, inputPortName = self.getWrapperPortName(inp, True)
                     )
-                    #newline += '      ' + inp.definition_cpp() + ';\n'
-                    # newline += '      nnet::copy_data<float, {}, {}, {}>(in, {});\n'.format(
-                    #     inp.type.name, offset, inp.size_cpp(), inp.name
-                    # )
+                    if self.vitis_unified_config.isFreeInterimInput():
+                        newline += '      nnet::copy_data_axi_w_offset<float, {underlyType}, {wrapType}, {offset}, {inputSize}>(in, {inputPortName});\n'.format(
+                            underlyType = inp.type.name,
+                            wrapType=streamPktType,
+                            offset=offset,
+                            inputSize=str(inp.size()),
+                            inputPortName=self.getWrapperPortName(inp, True)
+                        )
+                    else:
+                        newline += '      nnet::copy_data_axi_w_offset<float, {destype}, {offset}, {inputSize}>(in, {inputPortName});\n'.format(
+                            destype = streamPktType, offset=offset, inputSize=str(inp.size()),
+                            inputPortName=self.getWrapperPortName(inp, True)
+                        )
                     offset += inp.size()
                 for out in model_outputs:
-                    newline += '      ' + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)};\n"
-                    #newline += '      ' + out.definition_cpp() + ';\n'
+                    streamPktType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
+                    newline += '      ' + f"hls::stream<{streamPktType}> {self.getWrapperPortName(out, False)};\n"
+
             elif '// hls-fpga-machine-learning insert top-level-function' in line:
                 newline = line
 
@@ -431,47 +442,54 @@ class VitisUnifiedWriter(VitisWriter):
                     newline += indent + '  std::cout << pr[i] << " ";\n'
                     newline += indent + '}\n'
                     newline += indent + 'std::cout << std::endl;\n'
-            elif '// hls-fpga-machine-learning insert tb-output' in line:
-                newline = line
-                tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
-                if tb_stream != 'stdout':
-                    for outIdx, out in enumerate(model_outputs):
-                        # newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
-                        #     out.type.name, out.size_cpp(), out.name
-                        # )  # TODO enable this
-                        newline += indent + 'nnet::print_result<{actualType}, {dmaType}, {arrName}[{arrSize}]>({portName}, fout);\n'.format(
-                            actualType = out.type.name, dmaType = self.getDmaTypeName(), arrName = self.get_outputSizeArrName(model),arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
-                        )  # TODO enable this
+            # elif '// hls-fpga-machine-learning insert tb-output' in line:
+            #     newline = line
+            #     tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
+            #     if tb_stream != 'stdout':
+            #         for outIdx, out in enumerate(model_outputs):
+            #             # newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
+            #             #     out.type.name, out.size_cpp(), out.name
+            #             # )  # TODO enable this
+            #             newline += indent + 'nnet::print_result<{actualType}, {dmaType}, {arrName}[{arrSize}]>({portName}, fout);\n'.format(
+            #                 actualType = out.type.name, dmaType = self.getDmaTypeName(), arrName = self.get_outputSizeArrName(model),arrSize = str(outIdx), portName = self.getWrapperPortName(out, False)
+            #             )  # TODO enable this
             elif '// hls-fpga-machine-learning insert zero' in line:
                 newline = line
                 for inpIdx, inp in enumerate(model_inputs):
-                    # newline += indent + inp.definition_cpp() + ';\n'
-                    # newline += indent + f'nnet::fill_zero<{inp.type.name}, {inp.size_cpp()}>({inp.name});\n'
-                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(inp, True)};\n"
-                    newline += "        " + (f'nnet::fill_zero<{inp.type.name}, {self.getDmaTypeName()},{self.get_inputSizeArrName(model)}[{str(inpIdx)}]>'
+                    streamPktType = self.get_axi_wrapper_type(inp) if self.vitis_unified_config.isFreeInterimInput() else self.getDmaTypeName()
+                    fillZeroFunc  = "fill_zero_toArr" if self.vitis_unified_config.isFreeInterimInput() else "fill_zero"
+                    newline += "        " + f"hls::stream<{streamPktType}> {self.getWrapperPortName(inp, True)};\n"
+                    newline += "        " + (f'nnet::{fillZeroFunc}<{inp.type.name}, {streamPktType},{self.get_inputSizeArrName(model)}[{str(inpIdx)}]>'
                                              f'({self.getWrapperPortName(inp,True)});\n')
                 for out in model_outputs:
                     #newline += indent + out.definition_cpp() + ';\n'
-                    newline += "        " + f"hls::stream<{self.getDmaTypeName()}> {self.getWrapperPortName(out, False)};\n"
+                    streamPktType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
+                    newline += "        " + f"hls::stream<{streamPktType}> {self.getWrapperPortName(out, False)};\n"
 
             elif (
-                '// hls-fpga-machine-learning insert output' in line
+                   '// hls-fpga-machine-learning insert output'    in line
                 or '// hls-fpga-machine-learning insert quantized' in line
+                or '// hls-fpga-machine-learning insert tb-output' in line
             ):
                 newline = line
                 tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
-                keep_output = str(tb_stream != 'stdout').lower()  # We keep output if we need to write it to file too.
-                if tb_stream != 'file':
+                dest =  'fout' if ((tb_stream == 'file') or ('// hls-fpga-machine-learning insert tb-output' in line) ) else 'std::cout'
+
+                #keep_output = str(tb_stream != 'stdout').lower()  # We keep output if we need to write it to file too.
+                if tb_stream != 'file': ### it mean cout
                     for outIdx, out in enumerate(model_outputs):
                         #     newline += indent + 'nnet::print_result<{}, {}>({}, std::cout, {});\n'.format(
                         #         out.type.name, out.size_cpp(), out.name, keep_output
                         #     )
-                        newline += (indent + 'nnet::print_result<{actualType}, {dmaType}, {arrName}[{arrIdx}]>({portName}, std::cout, true);\n'
+                        streamPktType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
+
+                        newline += (indent + 'nnet::print_result<{actualType}, {pktType}, {arrName}[{arrIdx}]>({portName}, {des}, true);\n'
                                     .format( actualType = out.type.name,
-                                             dmaType = self.getDmaTypeName(),
-                                             arrName = self.get_outputSizeArrName(model),
-                                             arrIdx = str(outIdx),
-                                             portName = self.getWrapperPortName(out, False) ))
+                                             pktType    = streamPktType,
+                                             arrName    = self.get_outputSizeArrName(model),
+                                             arrIdx     = str(outIdx),
+                                             portName   = self.getWrapperPortName(out, False),
+                                             des        = dest))
 
             elif '// hls-fpga-machine-learning insert namespace' in line:
                 newline = ''

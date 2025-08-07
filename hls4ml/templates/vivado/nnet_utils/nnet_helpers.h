@@ -320,6 +320,21 @@ template <class src_T, class dst_T, size_t OFFSET, size_t SIZE> void copy_data_a
     }
 }
 
+//// it is used in vitisUnifed for interim layer connection
+template <class src_T, class underlying_data_T, class des_wrap_T, size_t OFFSET, size_t SIZE> void copy_data_axi_w_offset(std::vector<src_T> src, hls::stream<des_wrap_T> &dst) {
+    assert( (OFFSET + SIZE) <= src.size());
+    for (int i = 0; i < SIZE / underlying_data_T::size; i++) {
+        des_wrap_T data_pack;
+        for (int j = 0; j < underlying_data_T::size; j++) {
+            data_pack.data[j] = src[(i * underlying_data_T::size) + j];
+        }
+
+        data_pack.last = (i == ( (SIZE / underlying_data_T::size) - 1));
+        dst.write(data_pack);
+    }
+
+}
+
 template <class src_T, class dst_T, size_t SIZE> void copy_data_axi(std::vector<src_T> src, hls::stream<dst_T> &dst) {
     for (auto i = 0; i < SIZE; i++) {
         dst_T pack;
@@ -454,6 +469,20 @@ template <class underlying_data_T, class data_T, size_t SIZE> void fill_zero(hls
             data.write(data_pack);
         }
     }
+}
+
+// compatible with Vitis Unified  for res_T = hls::axis<underlying_data_T, ...> but underlying_data is array with pack
+template <class underlying_data_T, class data_T, size_t SIZE> void fill_zero_toArr(hls::stream<data_T>& data){
+
+    for (int i = 0; i < SIZE / underlying_data_T::size; i++) {
+        data_T data_pack;
+        for (int j = 0; j < underlying_data_T::size; j++) {
+            data_pack.data[j] = 0.;
+        }
+        data_pack.last = i == ( (SIZE / underlying_data_T::size) - 1);
+        data.write(data_pack);
+    }
+
 }
 
 template <class dataType, unsigned int nrows> int read_file_1D(const char *filename, dataType data[nrows]) {
