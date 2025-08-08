@@ -474,7 +474,7 @@ class VitisUnifiedWriter(VitisWriter):
                 newline = line
                 tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
                 dest =  'fout' if ((tb_stream == 'file') or ('// hls-fpga-machine-learning insert tb-output' in line) ) else 'std::cout'
-
+                keep_output = "true" if ("// hls-fpga-machine-learning insert tb-output" in line) else "false"
                 #keep_output = str(tb_stream != 'stdout').lower()  # We keep output if we need to write it to file too.
                 if tb_stream != 'file': ### it mean cout
                     for outIdx, out in enumerate(model_outputs):
@@ -483,13 +483,14 @@ class VitisUnifiedWriter(VitisWriter):
                         #     )
                         streamPktType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
 
-                        newline += (indent + 'nnet::print_result<{actualType}, {pktType}, {arrName}[{arrIdx}]>({portName}, {des}, true);\n'
+                        newline += (indent + 'nnet::print_result<{actualType}, {pktType}, {arrName}[{arrIdx}]>({portName}, {des}, {keepOutput});\n'
                                     .format( actualType = out.type.name,
                                              pktType    = streamPktType,
                                              arrName    = self.get_outputSizeArrName(model),
                                              arrIdx     = str(outIdx),
                                              portName   = self.getWrapperPortName(out, False),
-                                             des        = dest))
+                                             des        = dest,
+                                             keepOutput = keep_output))
 
             elif '// hls-fpga-machine-learning insert namespace' in line:
                 newline = ''
