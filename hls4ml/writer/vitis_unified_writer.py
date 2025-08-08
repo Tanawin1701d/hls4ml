@@ -248,7 +248,9 @@ class VitisUnifiedWriter(VitisWriter):
         newline += ", ".join(inputList) + ", " + ", ".join(outputList) + ");\n"
         return newline
 
-    ##### main function
+    ########################################################
+    ##### main function ####################################
+    ########################################################
 
     def write_axi_wrapper(self, model):
         '''
@@ -545,8 +547,19 @@ class VitisUnifiedWriter(VitisWriter):
                 dtype = line.split('#', 1)[1].strip()
                 newline = ''
                 for inpIdx, inp in enumerate(model_inputs): ## former is i
-                    newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(inp, True)};\n"
-                    newline += indent + f"nnet::convert_data<{dtype}, {dtype}, {self.get_inputSizeArrName(model)}[{str(inpIdx)}]>({inp.name}, {self.getWrapperPortName(inp, True)});\n"
+                    if self.vitis_unified_config.isFreeInterimInput():
+                        newline += indent + f"hls::stream<{inp.type.name}> {self.getWrapperPortName(inp, True)};\n"
+                        newline += indent + "nnet::convert_data_pkt<{srcType}, {underlying_data_T}, {data_T}, {sz}>({inpRaw}, {inp_wrapper});\n".format(
+                            srcType           =dtype,
+                            underlying_data_T=inp.type.name,
+                            data_T=self.get_axi_wrapper_type(inp),
+                            sz=str(inp.size()),
+                            inpRaw=inp.name,
+                            inp_wrapper=self.getWrapperPortName(inp, True),
+                        )
+                    else:
+                        newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(inp, True)};\n"
+                        newline += indent + f"nnet::convert_data<{dtype}, {dtype}, {self.get_inputSizeArrName(model)}[{str(inpIdx)}]>({inp.name}, {self.getWrapperPortName(inp, True)});\n"
                     # newline += indent + '{var};\n'.format(var=i.definition_cpp(name_suffix='_ap'))
                     # newline += indent + 'nnet::convert_data<{}, {}, {}>({}, {}_ap);\n'.format(
                     #     dtype, i.type.name, i.size_cpp(), i.name, i.name
@@ -555,7 +568,8 @@ class VitisUnifiedWriter(VitisWriter):
 
                 for out in model_outputs:
                     #newline += indent + '{var};\n'.format(var=o.definition_cpp(name_suffix='_ap'))
-                    newline += indent + f"hls::stream<dma_data_packet> {self.getWrapperPortName(out, False)};\n"
+                    outStreamType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
+                    newline += indent + f"hls::stream<{outStreamType}> {self.getWrapperPortName(out, False)};\n"
 
                 newline += '\n'
 
@@ -575,9 +589,11 @@ class VitisUnifiedWriter(VitisWriter):
                     # newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
                     #     o.type.name, dtype, o.size_cpp(), o.name, o.name
                     # )
-                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {self.get_outputSizeArrName(model)}[{str(outIdx)}]>"
-                                         f"({self.getWrapperPortName(out, False)}, {out.name});\n")
-
+                    if self.vitis_unified_config.isFreeInterimOutput():
+                        newline += indent + f"nnet::convert_data_pkt<{dtype}, {out.type.name}, {self.get_outputSizeArrName(model)}[{str(outIdx)}]>({self.getWrapperPortName(out, False)}, {out.name});\n"
+                    else:
+                        newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {self.get_axi_wrapper_type(out)},{self.get_outputSizeArrName(model)}[{str(outIdx)}]>"
+                                             f"({self.getWrapperPortName(out, False)}, {out.name});\n")
 
             elif '// hls-fpga-machine-learning insert trace_outputs' in line:
                 newline = ''
@@ -609,6 +625,7 @@ class VitisUnifiedWriter(VitisWriter):
     ########################################################
     ## write test script  function helper    ###############
     ########################################################
+
 
     def write_board_script(self, model):
         '''
@@ -742,13 +759,26 @@ class VitisUnifiedWriter(VitisWriter):
                 dtype = line.split('#', 1)[1].strip()
                 newline = ''
                 for inp in model_inputs:
-                    newline += indent + f"hls::stream<{self.getDmaTypeName()}> " + self.getWrapperPortName(inp, True) + ";\n"
-                    newline += indent + "nnet::convert_data<{dtype}, {dtype}, {sz}>({inpRaw}, {inp_wrapper});\n".format(
-                        dtype       =dtype,
-                        sz          =str(inp.size()),
-                        inpRaw      = inp.name,
-                        inp_wrapper =self.getWrapperPortName(inp, True),
-                    )
+
+                    if self.vitis_unified_config.isFreeInterimInput():
+                        newline += indent + f"hls::stream<{inp.type.name}> {self.getWrapperPortName(inp, True)};\n"
+                        newline += indent + "nnet::convert_data_pkt<{srcType}, {underlying_data_T}, {data_T}, {sz}>({inpRaw}, {inp_wrapper});\n".format(
+                            srcType           =dtype,
+                            underlying_data_T=inp.type.name,
+                            data_T=self.get_axi_wrapper_type(inp),
+                            sz=str(inp.size()),
+                            inpRaw=inp.name,
+                            inp_wrapper=self.getWrapperPortName(inp, True),
+                        )
+                    else:
+                        newline += indent + f"hls::stream<{self.getDmaTypeName()}> " + self.getWrapperPortName(inp, True) + ";\n"
+                        newline += indent + "nnet::convert_data<{dtype}, {dtype}, {sz}>({inpRaw}, {inp_wrapper});\n".format(
+                            dtype=dtype,
+                            sz=str(inp.size()),
+                            inpRaw=inp.name,
+                            inp_wrapper=self.getWrapperPortName(inp, True),
+                        )
+
                     # newline += indent + '{var};\n'.format(var=i.definition_cpp(name_suffix='_ap'))
                     # newline += indent + 'nnet::convert_data<{}, {}, {}>({}, {}_ap);\n'.format(
                     #     dtype, i.type.name, i.size_cpp(), i.name, i.name
@@ -759,7 +789,8 @@ class VitisUnifiedWriter(VitisWriter):
                 for idx, g in enumerate(model.graphs):
                     for out in g.get_output_variables():
                         outStreamName = self.getWrapperPortName(out, False)
-                        newline += indent + f"hls::stream<dma_data_packet> {outStreamName}(\"{outStreamName}\");\n"
+                        outStreamType = self.get_axi_wrapper_type(out) if self.vitis_unified_config.isFreeInterimOutput() else self.getDmaTypeName()
+                        newline += indent + f"hls::stream<{outStreamType}> {outStreamName}(\"{outStreamName}\");\n"
                         # definition = o.definition_cpp(name_suffix='_ap')
                         # if len(g.outputs) == 1:
                         #     parts = definition.split(' ', 1)
@@ -802,7 +833,7 @@ class VitisUnifiedWriter(VitisWriter):
 
                 newline += '\n'
 
-                for o in model_outputs:
+                for outIdx, o in enumerate(model_outputs):
                     # if len(model.graphs[-1].outputs) == 1:
                     #     newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
                     #         datatype, dtype, o.size_cpp(), o.name, o.name
@@ -811,8 +842,13 @@ class VitisUnifiedWriter(VitisWriter):
                     #     newline += indent + 'nnet::convert_data<{}, {}, {}>({}_ap, {});\n'.format(
                     #         o.type.name, dtype, o.size_cpp(), o.name, o.name
                     #     )
-                    newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {str(o.size())}>"
-                                         f"({self.getWrapperPortName(o, False)}, {o.name});\n")
+                    if self.vitis_unified_config.isFreeInterimOutput():
+                        newline += indent + (f"nnet::convert_data_pkt<{dtype}, {o.type.name}, "
+                                             f"{self.get_outputSizeArrName(model)}[{str(outIdx)}]>"
+                                             f"({self.getWrapperPortName(o, False)}, {o.name});\n")
+                    else:
+                        newline += indent + (f"nnet::convert_data<{dtype}, {dtype}, {str(o.size())}>"
+                                             f"({self.getWrapperPortName(o, False)}, {o.name});\n")
 
             elif '// hls-fpga-machine-learning insert trace_outputs' in line:
                 newline = ''

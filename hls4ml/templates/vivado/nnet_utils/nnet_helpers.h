@@ -166,7 +166,7 @@ template <class srcType, class dstType, size_t SIZE> void convert_data(hls::stre
     }
 }
 
-#ifdef VITIS_ACCELERATOR_IP_FLOW
+#if defined(VITIS_ACCELERATOR_IP_FLOW) || defined(VITIS_UNIFIED)
 // todo avoid hardcoding hls::axis<float, 0, 0, 0> and use template
 template <class srcType, typename dstType, size_t SIZE>
 void convert_data(srcType *src, hls::stream<hls::axis<float, 0, 0, 0>> &dst) {
@@ -184,6 +184,35 @@ void convert_data(hls::stream<hls::axis<float, 0, 0, 0>> &src, dstType *dst) {
         dst[i] = dstType(ctype.data);
     }
 }
+#endif
+
+#ifdef VITIS_UNIFIED
+////////// data t should be the wrapper of type underlying_data_T
+template <class srcType, typename underlying_data_T, typename data_T, size_t SIZE>
+void convert_data_pkt(srcType* src, hls::stream<data_T> &dst){
+
+    for (int i = 0; i < SIZE / underlying_data_T::size; i++) {
+        data_T data_pack;
+        for (int j = 0; j < underlying_data_T::size; j++) {
+            data_pack.data[j] = src[i*underlying_data_T::size +  j];
+        }
+        data_pack.last = (i == (SIZE / underlying_data_T::size - 1));
+        dst.write(data_pack);
+    }
+}
+
+template <class srcType, typename underlying_data_T, typename data_T, size_t SIZE>
+void convert_data_pkt(hls::stream<data_T>& src, srcType* dst){
+
+    for (int i = 0; i < SIZE / underlying_data_T::size; i++) {
+        data_T res_pack = src.read(); //// pkt type
+        for (int j = 0; j < underlying_data_T::size; j++) {
+            dst[i* underlying_data_T::size + j] = res_pack.data[j];
+        }
+    }
+
+}
+
 #endif
 
 extern bool trace_enabled;
