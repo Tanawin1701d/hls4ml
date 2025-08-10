@@ -31,4 +31,8 @@ myTest12_skipper/*
 myTest14_skiper2/*
 myTest15_skipCotest/*
 myTest16_skiper3/*
+myTest17TestRefactor/*
+myTest18TestLatency/*
+myTest19TestRefactor/*
+myTest20_optimizedSkip/*
 environment.yml

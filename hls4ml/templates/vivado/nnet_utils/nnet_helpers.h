@@ -13,8 +13,10 @@
 
 // this header cannot be included by Vivado HLS
 // "VITIS_ACCELERATOR_IP_FLOW" is defined on the build_lib.sh of the `Vitis Accelerator` template files
-#ifdef VITIS_ACCELERATOR_IP_FLOW
+#if defined(VITIS_ACCELERATOR_IP_FLOW) || defined(VITIS_UNIFIED)
+
 #include "ap_axi_sdata.h"
+
 #endif
 namespace nnet {
 
