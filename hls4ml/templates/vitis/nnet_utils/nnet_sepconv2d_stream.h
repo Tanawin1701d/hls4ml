@@ -41,6 +41,7 @@ void depthwise_conv_2d_buffer_cl(
         ReadInputWidthSerial:
             for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width; i_iw++) {
                 #pragma HLS LOOP_FLATTEN
+                #pragma HLS PIPELINE II=CONFIG_T::reuse_factor
                 if (CONFIG_T::filt_height > 1) {
                     compute_depthwise_output_buffer_2d<data_T, res_T, CONFIG_T>(data.read(), line_buffer, res, weights,
                                                                                 biases);
