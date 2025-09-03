@@ -122,7 +122,7 @@ class VitisUnifiedPartial_WrapperGen(VitisUnified_WrapperGen):
             if "MY_PROJECT_TOP_FUNC" in line:
                 newline = line.replace("MY_PROJECT_TOP_FUNC", mg.get_top_wrap_func_name(model))
             elif "MY_PROJECT_AXI_INC" in line:
-                newline = line.replace("MY_PROJECT_AXI_INC", mg.get_main_wrapper_file_name(model))
+                newline = line.replace("MY_PROJECT_AXI_INC", mg.get_top_wrap_func_name(model))
             elif "// hls-fpga-machine-learning insert definitions" in line:
                 # make input
                 newline = ''

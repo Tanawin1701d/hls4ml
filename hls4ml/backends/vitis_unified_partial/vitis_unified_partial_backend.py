@@ -49,19 +49,20 @@ class VitisUnifiedPartialBackend(VitisUnifiedBackend):
                 magic_arch_prj,
             )
 
-        # super().build(
-        # model,
-        # reset,
-        # csim,
-        # synth,
-        # cosim,
-        # validation,
-        # export,
-        # vsynth,
-        # fifo_opt,
-        # bitfile,
-        # log_to_stdout
-        # )
+        else:
+            super().build(
+                model=model,
+                reset=reset,
+                csim=csim,
+                synth=synth,
+                cosim=cosim,
+                validation=validation,
+                export=export,
+                vsynth=vsynth,
+                fifo_opt=fifo_opt,
+                bitfile=bitfile,
+                log_to_stdout=log_to_stdout,
+            )
 
     def create_initial_config(
         self,
