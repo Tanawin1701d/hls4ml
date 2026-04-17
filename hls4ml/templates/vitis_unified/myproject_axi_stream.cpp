@@ -17,6 +17,26 @@ load_input_loop:
     }
 }
 
+void load_input_flat(hls::stream<dma_input_flat_data_packet> &axi_input_stream,
+                     hls::stream<INPUT_LAYER_TYPE> &model_input_stream, int batch_size) {
+load_input_loop:
+    // send the data to the stream
+    for (int q = 0; q < batch_size; q++) {
+        for (unsigned chunk_idx = 0; chunk_idx < N_IN / INPUT_LAYER_TYPE::size; ++chunk_idx) {
+            INPUT_LAYER_TYPE input_chunk;
+            for (unsigned elem_idx = 0; elem_idx < INPUT_LAYER_TYPE::size; elem_idx++) {
+                dma_input_flat_data_packet axi_packet;
+                axi_input_stream.read(axi_packet);
+                typedef INPUT_LAYER_TYPE::value_type data_t;
+                const int copy_bit_size = data_t().length();
+                input_chunk[elem_idx] = 0;
+                input_chunk[elem_idx].range(copy_bit_size - 1, 0) = axi_packet.data.range(copy_bit_size - 1, 0);
+            }
+            model_input_stream.write(input_chunk);
+        }
+    }
+}
+
 void store_result(hls::stream<OUTPUT_LAYER_TYPE> &model_output_stream, hls::stream<dma_data_packet> &axi_output_stream,
                   int batch_size) {
 store_result_loop:
@@ -35,6 +55,27 @@ store_result_loop:
     }
 }
 
+void store_result_flat(hls::stream<OUTPUT_LAYER_TYPE> &model_output_stream,
+                       hls::stream<dma_output_flat_data_packet> &axi_output_stream, int batch_size) {
+store_result_loop:
+    // send back the data
+    for (int q = 0; q < batch_size; q++) {
+        for (unsigned chunk_idx = 0; chunk_idx < N_OUT / OUTPUT_LAYER_TYPE::size; ++chunk_idx) {
+            OUTPUT_LAYER_TYPE output_chunk = model_output_stream.read();
+            for (unsigned elem_idx = 0; elem_idx < OUTPUT_LAYER_TYPE::size; elem_idx++) {
+                dma_output_flat_data_packet axi_packet;
+                axi_packet.keep = -1;
+                typedef OUTPUT_LAYER_TYPE::value_type data_t;
+                const int copy_bit_size = data_t().length();
+                axi_packet.data = 0;
+                axi_packet.data.range(copy_bit_size - 1, 0) = output_chunk[elem_idx].range(copy_bit_size - 1, 0);
+                axi_packet.last = (q == (batch_size - 1)) && (((chunk_idx + 1) * (elem_idx + 1)) == N_OUT);
+                axi_output_stream.write(axi_packet);
+            }
+        }
+    }
+}
+
 void compute( // hls-fpga-machine-learning insert stream parameter,
     int batch_size) {
     for (int q = 0; q < batch_size; q++) {
@@ -42,8 +83,8 @@ void compute( // hls-fpga-machine-learning insert stream parameter,
     }
 }
 
-void MY_PROJECT_TOP_FUNC(hls::stream<dma_data_packet> &axi_input_stream, hls::stream<dma_data_packet> &axi_output_stream,
-                         int batch_size) {
+void MY_PROJECT_TOP_FUNC(hls::stream<MY_DMA_PACKET_TYPE_INPUT> &axi_input_stream,
+                         hls::stream<MY_DMA_PACKET_TYPE_OUTPUT> &axi_output_stream, int batch_size) {
 
     // hls-fpga-machine-learning insert interface
 
@@ -51,7 +92,7 @@ void MY_PROJECT_TOP_FUNC(hls::stream<dma_data_packet> &axi_input_stream, hls::st
 
     #pragma HLS DATAFLOW
 
-    load_input(axi_input_stream, model_input_stream, batch_size);
+    load_input_IS_FLAT(axi_input_stream, model_input_stream, batch_size);
     compute(model_input_stream, model_output_stream, batch_size);
-    store_result(model_output_stream, axi_output_stream, batch_size);
+    store_result_IS_FLAT(model_output_stream, axi_output_stream, batch_size);
 }

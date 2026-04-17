@@ -48,6 +48,14 @@ class VitisUnifiedWriter(VitisWriter):
     def _is_axi_stream(self):
         return self.vitis_unified_config.get_axi_mode() == 'axi_stream'
 
+    def _is_axi_flat_input(self):
+        assert self._is_axi_stream(), "you must set axi_mode to 'axi_stream' to use axi_flat_input"
+        return self.vitis_unified_config.is_input_flat()
+
+    def _is_axi_flat_output(self):
+        assert self._is_axi_stream(), "you must set axi_mode to 'axi_stream' to use axi_flat_output"
+        return self.vitis_unified_config.is_output_flat()
+
     def _is_axi_master(self):
         return self.vitis_unified_config.get_axi_mode() == 'axi_master'
 
@@ -86,8 +94,28 @@ class VitisUnifiedWriter(VitisWriter):
         direction = 'in' if is_input else 'out'
         return f'stream_{direction}{idx}_{tensor_var.name}'
 
-    def _get_dma_type_name(self):
+    def _get_dma_float_type_name(self):
         return 'dma_data_packet'
+
+    @staticmethod
+    def _get_flat_size(target_size: int) -> int:
+        """Return the minimum power of two strictly greater than target_size, and at least 8."""
+        result = 1 << int(target_size).bit_length()
+        return max(8, result)
+
+    def _get_dma_flat_template_name(self, model, is_input):
+        """Return the C++ template arg (e.g. 'ap_uint<16>') for the flat packet type."""
+        _, _, inputs, outputs = self.vitis_unified_config.get_corrected_types()
+        prec_width = int((inputs[0] if is_input else outputs[0]).type.precision.width)
+        return f'ap_uint<{self._get_flat_size(prec_width)}>'
+
+    def _get_dma_flat_type_name(self, is_input):
+        return 'dma_input_flat_data_packet' if is_input else 'dma_output_flat_data_packet'
+
+    def _get_dma_type_name(self, is_input):
+        if self._is_axi_flat_input() or self._is_axi_flat_output():
+            return self._get_dma_flat_type_name(is_input)
+        return self._get_dma_float_type_name()
 
     @staticmethod
     def _gen_hex_addr_list(start_addr, stride, size, indent):
@@ -321,11 +349,11 @@ fi
                             inp_stream = inp_func + '_ap'
                             out_func = self._get_io_port_name(out, False, 0)
                             out_stream = out_func + '_ap'
-                            newline = indent + f'hls::stream<{self._get_dma_type_name()}> {inp_stream};\n'
+                            newline = indent + f'hls::stream<{self._get_dma_float_type_name()}> {inp_stream};\n'
                             newline += (
                                 indent + f'nnet::convert_data_axis<{dtype},{dtype}, N_IN>({inp_func}, {inp_stream});\n'
                             )
-                            newline += indent + f'hls::stream<{self._get_dma_type_name()}> {out_stream};\n'
+                            newline += indent + f'hls::stream<{self._get_dma_float_type_name()}> {out_stream};\n'
                             newline += indent + self._get_top_wrap_func_name(model, False) + '('
                             newline += inp_stream + ', ' + out_stream + ', 1);\n'
                             newline += (
@@ -413,6 +441,15 @@ fi
                     newline = line.replace('OUTPUT_LAYER_TYPE', out.type.name)
                 elif 'OUTPUT_GMEM_TYPE' in line:
                     newline = line.replace('OUTPUT_GMEM_TYPE', out_gmem_t)
+                elif 'MY_DMA_PACKET_TYPE_INPUT' in line:
+                    newline = line.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
+                elif 'MY_DMA_PACKET_TYPE_OUTPUT' in line:
+                    newline = line.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
+                elif 'load_input_IS_FLAT' in line:
+                    newline = line.replace('_IS_FLAT', '_flat' if self._is_axi_flat_input() else '')
+                elif 'store_result_IS_FLAT' in line:
+                    newline = line.replace('_IS_FLAT', '_flat' if self._is_axi_flat_output() else '')
+
                 else:
                     newline = line
                 fout.write(newline)
@@ -432,7 +469,19 @@ fi
                     newline = ''
                     newline += f'static const unsigned N_IN = {inp.size()};\n'
                     newline += f'static const unsigned N_OUT = {out.size()};\n'
-                    newline += f'typedef hls::axis<{inp_gmem_t}, 0, 0, 0> {self._get_dma_type_name()};\n'
+                    newline += f'typedef hls::axis<{inp_gmem_t}, 0, 0, 0> {self._get_dma_float_type_name()};\n'
+                    newline += (
+                        f'typedef hls::axis<{self._get_dma_flat_template_name(model, True)}, 0, 0, 0> '
+                        f'{self._get_dma_flat_type_name(True)};\n'
+                    )
+                    newline += (
+                        f'typedef hls::axis<{self._get_dma_flat_template_name(model, False)}, 0, 0, 0> '
+                        f'{self._get_dma_flat_type_name(False)};\n'
+                    )
+                elif 'MY_DMA_PACKET_TYPE_INPUT' in line:
+                    newline = line.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
+                elif 'MY_DMA_PACKET_TYPE_OUTPUT' in line:
+                    newline = line.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
                 else:
                     newline = line
                 fout.write(newline)
@@ -651,10 +700,10 @@ fi
                     else:
                         assert len(model_inputs) == 1, 'Only support one input for axi stream'
                         assert len(model_outputs) == 1, 'Only support one output for axi stream'
-                        newline += 3 * indent + f'hls::stream<{self._get_dma_type_name()}> inputs;\n'
+                        newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> inputs;\n'
                         newline += 3 * indent + 'nnet::convert_data_axis<float,float, N_IN>(in, inputs);\n'
                         newline += 3 * indent + 'std::cout << "input size inputs: " << inputs.size() << std::endl;\n'
-                        newline += 3 * indent + f'hls::stream<{self._get_dma_type_name()}> outputs;\n\n'
+                        newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> outputs;\n\n'
                 elif '// hls-fpga-machine-learning insert top-level-function' in line:
                     newline = line
                     input_ios = []
@@ -693,10 +742,12 @@ fi
                                 indent + f'float {self._get_io_port_name(out, False, output_idx)}[{out.size()}] = {{}};\n'
                             )
                     else:
-                        newline += 3 * indent + f'hls::stream<{self._get_dma_type_name()}> inputs;\n'
-                        newline += 3 * indent + f'nnet::fill_zero_axi<{self._get_dma_type_name()}, N_IN>(inputs, false);\n'
+                        newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> inputs;\n'
+                        newline += (
+                            3 * indent + f'nnet::fill_zero_axi<{self._get_dma_float_type_name()}, N_IN>(inputs, false);\n'
+                        )
                         newline += 3 * indent + 'std::cout << "input size inputs: " << inputs.size() << std::endl;\n'
-                        newline += 3 * indent + f'hls::stream<{self._get_dma_type_name()}> outputs;\n\n'
+                        newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> outputs;\n\n'
                 elif '// hls-fpga-machine-learning insert tb-output' in line:
                     newline = line
                     tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
@@ -714,8 +765,8 @@ fi
                                 )
                         else:
                             newline += (
-                                indent
-                                + f'nnet::print_result_axis<{self._get_dma_type_name()}, N_OUT>(outputs, fout, false);\n'
+                                indent + f'nnet::print_result_axis<{self._get_dma_float_type_name()}'
+                                f', N_OUT>(outputs, fout, false);\n'
                             )
                 elif ('// hls-fpga-machine-learning insert output' in line) or (
                     '// hls-fpga-machine-learning insert quantized' in line
@@ -737,7 +788,7 @@ fi
                                 )
                         else:
                             newline += indent + (
-                                f'nnet::print_result_axis<{self._get_dma_type_name()}, N_OUT>('
+                                f'nnet::print_result_axis<{self._get_dma_float_type_name()}, N_OUT>('
                                 f'outputs, std::cout, {keep_output});\n'
                             )
                 elif '// hls-fpga-machine-learning insert namespace' in line:

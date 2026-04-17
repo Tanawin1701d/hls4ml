@@ -110,6 +110,9 @@ class VitisUnifiedBackend(VitisBackend):
         in_stream_buf_size=128,
         out_stream_buf_size=128,
         axi_mode='axi_master',
+        input_flat=False,
+        output_flat=False,
+        package_as_xo=True,
         **_,
     ):
         supported_boards_path = os.path.join(os.path.dirname(__file__), 'supported_boards.json')
@@ -128,6 +131,8 @@ class VitisUnifiedBackend(VitisBackend):
         config['VitisUnifiedConfig'] = {}
         config['VitisUnifiedConfig']['Board'] = board
         config['VitisUnifiedConfig']['axi_mode'] = axi_mode
+        config['VitisUnifiedConfig']['input_flat'] = input_flat
+        config['VitisUnifiedConfig']['output_flat'] = output_flat
         config['VitisUnifiedConfig']['in_stream_buf_size'] = in_stream_buf_size
         config['VitisUnifiedConfig']['out_stream_buf_size'] = out_stream_buf_size
 
