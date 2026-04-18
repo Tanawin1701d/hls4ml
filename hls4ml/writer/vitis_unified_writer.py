@@ -113,7 +113,7 @@ class VitisUnifiedWriter(VitisWriter):
         return 'dma_input_flat_data_packet' if is_input else 'dma_output_flat_data_packet'
 
     def _get_dma_type_name(self, is_input):
-        if self._is_axi_flat_input() or self._is_axi_flat_output():
+        if (is_input and self._is_axi_flat_input()) or ((not is_input) and self._is_axi_flat_output()):
             return self._get_dma_flat_type_name(is_input)
         return self._get_dma_float_type_name()
 
@@ -185,7 +185,8 @@ class VitisUnifiedWriter(VitisWriter):
                 if '{FILE_NAME_BASE}' in line:
                     line = line.replace('{FILE_NAME_BASE}', self._get_project_name(model))
                 if '{OUTPUT_KERNEL_TYPE}' in line:
-                    line = line.replace('{OUTPUT_KERNEL_TYPE}', 'xo')
+                    kernel_type = 'xo' if self.vitis_unified_config.get_package_as_xo() else 'ip_catalog'
+                    line = line.replace('{OUTPUT_KERNEL_TYPE}', kernel_type)
                 if is_csim and (('enable_fifo_sizing' in line) or ('-DRTL_SIM' in line)):
                     line = '#' + line
                 fout.write(line)

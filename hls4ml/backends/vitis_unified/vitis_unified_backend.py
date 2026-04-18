@@ -139,6 +139,7 @@ class VitisUnifiedBackend(VitisBackend):
         config['VitisUnifiedConfig']['Driver'] = driver
         config['VitisUnifiedConfig']['InputDtype'] = input_type  # float, double or ap_fixed<a,b>
         config['VitisUnifiedConfig']['OutputDtype'] = output_type  # float, double or ap_fixed<a,b>
+        config['VitisUnifiedConfig']['package_as_xo'] = package_as_xo
 
         if io_type != 'io_stream':
             raise Exception('io_type must be io_stream')

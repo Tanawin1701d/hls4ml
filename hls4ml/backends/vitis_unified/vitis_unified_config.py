@@ -23,6 +23,8 @@ class VitisUnifiedConfig:
             self.input_flat = self.config['VitisUnifiedConfig']['input_flat']
             self.output_flat = self.config['VitisUnifiedConfig']['output_flat']
 
+        self.package_as_xo = self.config['VitisUnifiedConfig'].get('package_as_xo', True)
+
         # axi master buffer size
         # before first and after last layer we have the configurable buffer
         # [platform]<-->[in_stream_buf_size]<-->[hls]<-->[out_stream_buf_size]<-->[platform]
@@ -138,6 +140,9 @@ class VitisUnifiedConfig:
 
     def get_axi_mode(self):
         return self.axi_mode
+
+    def get_package_as_xo(self):
+        return self.package_as_xo
 
     def is_input_flat(self):
         return self.input_flat
