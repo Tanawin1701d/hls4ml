@@ -218,8 +218,13 @@ _HLS_PARAMS = dict(
     input_type='float',
     output_type='float',
     axi_mode='axi_stream',
-    project_name='my_project_2',
 )
+
+_PROJECT_NAMES = {
+    'full': 'my_proj_full',
+    'first_half': 'my_proj_first',
+    'second_half': 'my_proj_second',
+}
 
 
 # ===========================================================================
@@ -250,6 +255,8 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
             output_dir=output_dir,
             input_flat=input_flat,
             output_flat=output_flat,
+            package_as_xo=full_run,
+            project_name=_PROJECT_NAMES[key],
             **_HLS_PARAMS,
         )
 
@@ -275,6 +282,13 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
             print(f'  [{key}] compile raised (caught): {type(exc).__name__}: {exc}')
 
     if not full_run:
+        src_cfg = os.path.join(output_dir, 'hls_kernel_config_csim.cfg')
+        dst_cfg = os.path.join(output_dir, 'hls_kernel_config.cfg')
+        if os.path.exists(src_cfg):
+            import shutil
+
+            shutil.copy2(src_cfg, dst_cfg)
+            print(f'  [{key}] copied hls_kernel_config_csim.cfg → hls_kernel_config.cfg')
         _tlog_write(key, f'=== [{key}] stopped after compile  {time.strftime("%Y-%m-%d %H:%M:%S")} ===')
         _tlogs[key][0].close()
         return hls_model
