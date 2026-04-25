@@ -23,15 +23,10 @@ load_input_loop:
     // send the data to the stream
     for (int q = 0; q < batch_size; q++) {
         for (unsigned chunk_idx = 0; chunk_idx < N_IN / INPUT_LAYER_TYPE::size; ++chunk_idx) {
+            dma_input_flat_data_packet axi_packet;
+            axi_input_stream.read(axi_packet);
             INPUT_LAYER_TYPE input_chunk;
-            for (unsigned elem_idx = 0; elem_idx < INPUT_LAYER_TYPE::size; elem_idx++) {
-                dma_input_flat_data_packet axi_packet;
-                axi_input_stream.read(axi_packet);
-                typedef INPUT_LAYER_TYPE::value_type data_t;
-                const int copy_bit_size = data_t().length();
-                input_chunk[elem_idx] = 0;
-                input_chunk[elem_idx].range(copy_bit_size - 1, 0) = axi_packet.data.range(copy_bit_size - 1, 0);
-            }
+            input_chunk = axi_packet.data;
             model_input_stream.write(input_chunk);
         }
     }
@@ -62,16 +57,10 @@ store_result_loop:
     for (int q = 0; q < batch_size; q++) {
         for (unsigned chunk_idx = 0; chunk_idx < N_OUT / OUTPUT_LAYER_TYPE::size; ++chunk_idx) {
             OUTPUT_LAYER_TYPE output_chunk = model_output_stream.read();
-            for (unsigned elem_idx = 0; elem_idx < OUTPUT_LAYER_TYPE::size; elem_idx++) {
-                dma_output_flat_data_packet axi_packet;
-                axi_packet.keep = -1;
-                typedef OUTPUT_LAYER_TYPE::value_type data_t;
-                const int copy_bit_size = data_t().length();
-                axi_packet.data = 0;
-                axi_packet.data.range(copy_bit_size - 1, 0) = output_chunk[elem_idx].range(copy_bit_size - 1, 0);
-                axi_packet.last = (q == (batch_size - 1)) && (((chunk_idx + 1) * (elem_idx + 1)) == N_OUT);
-                axi_output_stream.write(axi_packet);
-            }
+            dma_output_flat_data_packet axi_packet;
+            axi_packet.data = output_chunk;
+            axi_packet.last = (q == (batch_size - 1)) && ((chunk_idx + 1) == (N_OUT / result_t::size));
+            axi_output_stream.write(axi_packet);
         }
     }
 }

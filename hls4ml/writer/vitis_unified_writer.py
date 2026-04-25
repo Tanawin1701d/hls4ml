@@ -103,11 +103,10 @@ class VitisUnifiedWriter(VitisWriter):
         result = 1 << int(target_size).bit_length()
         return max(8, result)
 
-    def _get_dma_flat_template_name(self, model, is_input):
+    def _get_dma_flat_template_name(self, is_input):
         """Return the C++ template arg (e.g. 'ap_uint<16>') for the flat packet type."""
         _, _, inputs, outputs = self.vitis_unified_config.get_corrected_types()
-        prec_width = int((inputs[0] if is_input else outputs[0]).type.precision.width)
-        return f'ap_uint<{self._get_flat_size(prec_width)}>'
+        return inputs[0].type.name if is_input else outputs[0].type.name
 
     def _get_dma_flat_type_name(self, is_input):
         return 'dma_input_flat_data_packet' if is_input else 'dma_output_flat_data_packet'
@@ -404,13 +403,14 @@ fi
             open(f'{model.config.get_output_dir()}/firmware/{self._get_project_name(model)}_axi_stream.cpp', 'w') as fout,
         ):
             for line in fin.readlines():
-                if 'MY_PROJECT_TOP_FUNC' in line:
-                    newline = line.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
-                elif 'MY_PROJECT(' in line:
-                    newline = line.replace('MY_PROJECT', self._get_project_name(model))
-                elif '// hls-fpga-machine-learning insert include' in line:
+                newline = line
+                if 'MY_PROJECT_TOP_FUNC' in newline:
+                    newline = newline.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
+                if 'MY_PROJECT(' in newline:
+                    newline = newline.replace('MY_PROJECT', self._get_project_name(model))
+                if '// hls-fpga-machine-learning insert include' in newline:
                     newline = f'#include "{self._get_project_name(model)}_axi_stream.h"\n'
-                elif '// hls-fpga-machine-learning insert interface' in line:
+                if '// hls-fpga-machine-learning insert interface' in newline:
                     newline = (
                         indent
                         + '#pragma HLS INTERFACE axis port=axi_input_stream\n'
@@ -421,7 +421,7 @@ fi
                         + indent
                         + '#pragma HLS INTERFACE s_axilite port=batch_size bundle=control\n'
                     )
-                elif '// hls-fpga-machine-learning insert stream decl' in line:
+                if '// hls-fpga-machine-learning insert stream decl' in newline:
                     in_depth = model.get_input_variables()[0].pragma[1]
                     out_depth = model.get_output_variables()[0].pragma[1]
                     newline = ''
@@ -429,30 +429,28 @@ fi
                     newline += indent + f'static hls::stream<{out.type.name}> model_output_stream("model_output");\n\n'
                     newline += indent + f'#pragma HLS STREAM variable=model_input_stream depth={in_depth}\n'
                     newline += indent + f'#pragma HLS STREAM variable=model_output_stream depth={out_depth}\n'
-                elif '// hls-fpga-machine-learning insert stream parameter' in line:
-                    newline = line.replace(
+                if '// hls-fpga-machine-learning insert stream parameter' in newline:
+                    newline = newline.replace(
                         '// hls-fpga-machine-learning insert stream parameter',
                         f'hls::stream<{inp.type.name}> &model_input_stream, '
                         f'hls::stream<{out.type.name}> &model_output_stream',
                     )
 
-                elif 'INPUT_LAYER_TYPE' in line:
-                    newline = line.replace('INPUT_LAYER_TYPE', inp.type.name)
-                elif 'OUTPUT_LAYER_TYPE' in line:
-                    newline = line.replace('OUTPUT_LAYER_TYPE', out.type.name)
-                elif 'OUTPUT_GMEM_TYPE' in line:
-                    newline = line.replace('OUTPUT_GMEM_TYPE', out_gmem_t)
-                elif 'MY_DMA_PACKET_TYPE_INPUT' in line:
-                    newline = line.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
-                elif 'MY_DMA_PACKET_TYPE_OUTPUT' in line:
-                    newline = line.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
-                elif 'load_input_IS_FLAT' in line:
-                    newline = line.replace('_IS_FLAT', '_flat' if self._is_axi_flat_input() else '')
-                elif 'store_result_IS_FLAT' in line:
-                    newline = line.replace('_IS_FLAT', '_flat' if self._is_axi_flat_output() else '')
+                if 'INPUT_LAYER_TYPE' in newline:
+                    newline = newline.replace('INPUT_LAYER_TYPE', inp.type.name)
+                if 'OUTPUT_LAYER_TYPE' in newline:
+                    newline = newline.replace('OUTPUT_LAYER_TYPE', out.type.name)
+                if 'OUTPUT_GMEM_TYPE' in newline:
+                    newline = newline.replace('OUTPUT_GMEM_TYPE', out_gmem_t)
+                if 'MY_DMA_PACKET_TYPE_INPUT' in newline:
+                    newline = newline.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
+                if 'MY_DMA_PACKET_TYPE_OUTPUT' in newline:
+                    newline = newline.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
+                if 'load_input_IS_FLAT' in newline:
+                    newline = newline.replace('_IS_FLAT', '_flat' if self._is_axi_flat_input() else '')
+                if 'store_result_IS_FLAT' in newline:
+                    newline = newline.replace('_IS_FLAT', '_flat' if self._is_axi_flat_output() else '')
 
-                else:
-                    newline = line
                 fout.write(newline)
 
         with (
@@ -460,31 +458,36 @@ fi
             open(f'{model.config.get_output_dir()}/firmware/{self._get_project_name(model)}_axi_stream.h', 'w') as fout,
         ):
             for line in fin.readlines():
-                if 'MYPROJECT' in line:
-                    newline = line.replace('MYPROJECT', self._get_project_name(model).upper())
-                elif '// hls-fpga-machine-learning insert include' in line:
+                newline = line
+                if 'MYPROJECT' in newline:
+                    newline = newline.replace('MYPROJECT', self._get_project_name(model).upper())
+                if '// hls-fpga-machine-learning insert include' in newline:
                     newline = f'#include "{self._get_project_name(model)}.h"\n#include "ap_axi_sdata.h"\n'
-                elif 'MY_PROJECT_TOP_FUNC' in line:
-                    newline = line.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
-                elif '// hls-fpga-machine-learning insert definitions' in line:
+                if 'MY_PROJECT_TOP_FUNC' in newline:
+                    newline = newline.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
+                if '// hls-fpga-machine-learning insert definitions' in newline:
                     newline = ''
                     newline += f'static const unsigned N_IN = {inp.size()};\n'
                     newline += f'static const unsigned N_OUT = {out.size()};\n'
-                    newline += f'typedef hls::axis<{inp_gmem_t}, 0, 0, 0> {self._get_dma_float_type_name()};\n'
                     newline += (
-                        f'typedef hls::axis<{self._get_dma_flat_template_name(model, True)}, 0, 0, 0> '
+                        f'typedef hls::axis<{inp_gmem_t}, 0, 0, 0, '
+                        f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> {self._get_dma_float_type_name()};\n'
+                    )
+                    newline += (
+                        f'typedef hls::axis<{self._get_dma_flat_template_name(True)}, 0, 0, 0, '
+                        f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
                         f'{self._get_dma_flat_type_name(True)};\n'
                     )
                     newline += (
-                        f'typedef hls::axis<{self._get_dma_flat_template_name(model, False)}, 0, 0, 0> '
+                        f'typedef hls::axis<{self._get_dma_flat_template_name(False)}, 0, 0, 0, '
+                        f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
                         f'{self._get_dma_flat_type_name(False)};\n'
                     )
-                elif 'MY_DMA_PACKET_TYPE_INPUT' in line:
-                    newline = line.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
-                elif 'MY_DMA_PACKET_TYPE_OUTPUT' in line:
-                    newline = line.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
-                else:
-                    newline = line
+                if 'MY_DMA_PACKET_TYPE_INPUT' in newline:
+                    newline = newline.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
+                if 'MY_DMA_PACKET_TYPE_OUTPUT' in newline:
+                    newline = newline.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
+
                 fout.write(newline)
 
     def _write_wrapper_axim(self, model):
