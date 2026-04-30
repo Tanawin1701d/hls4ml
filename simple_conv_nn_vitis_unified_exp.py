@@ -30,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 from keras.src.layers import GlobalAveragePooling2D, UpSampling2D
-from tensorflow.keras.layers import Conv2D, Dense, Input, MaxPooling2D
+from tensorflow.keras.layers import Activation, Conv2D, Dense, Input, MaxPooling2D
 from tensorflow.keras.models import Model
 
 import hls4ml
@@ -144,7 +144,8 @@ with timed_step('full', '1. Keras model definition'):
     # -------- Head --------
     y = GlobalAveragePooling2D(name='gap')(y)
     y = Dense(64, activation='relu', name='dense1')(y)
-    full_out = Dense(4, activation='softmax', name='dense_out')(y)
+    y = Dense(4, activation=None, name='dense_out')(y)
+    full_out = Activation('softmax', name='softmax_out')(y)
 
     full_model = Model(inp, full_out, name='full_model')
     full_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
@@ -153,8 +154,13 @@ with timed_step('full', '1. Keras model definition'):
         full_model.load_weights(str(_WEIGHTS_FILE))
         msg = f'Weights loaded ← {_WEIGHTS_FILE}'
     else:
+        np.random.seed(0)
+        X_tr = np.random.rand(500, 8, 8, 1).astype(np.float32)
+        y_tr = np.eye(4)[np.random.randint(0, 4, 500)]
+        print('[train] Training for 20 epochs to break weight symmetry…')
+        full_model.fit(X_tr, y_tr, epochs=20, batch_size=32, verbose=0)
         full_model.save_weights(str(_WEIGHTS_FILE))
-        msg = f'Weights saved  → {_WEIGHTS_FILE}'
+        msg = f'Weights trained + saved → {_WEIGHTS_FILE}'
     print(f'[lock] {msg}')
     _tlog_write('full', msg)
 
@@ -175,6 +181,7 @@ z = full_model.get_layer('dec_conv2')(z)
 z = full_model.get_layer('gap')(z)
 z = full_model.get_layer('dense1')(z)
 z = full_model.get_layer('dense_out')(z)
+z = full_model.get_layer('softmax_out')(z)
 second_half_model = Model(sec_inp, z, name='second_half')
 second_half_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
@@ -228,6 +235,93 @@ _PROJECT_NAMES = {
 
 
 # ===========================================================================
+# Diagnostic: bisect the full model layer-by-layer to find where HLS signal dies
+# ===========================================================================
+def _diag_hls_bisect(full_keras_model, X_input, base_dir):
+    """
+    Build a truncated hls4ml model ending at each probe layer, run csim predict,
+    and print min/max/mean so we can pinpoint where the signal collapses.
+    """
+    probe_layers = [
+        'enc_conv1',
+        'enc_conv2',
+        'enc_pool1',
+        'enc_conv3',
+        'enc_conv4',
+        'enc_pool2',
+        'bottleneck',
+        'dec_up1',
+        'dec_conv1',
+        'dec_up2',
+        'dec_conv2',
+        'gap',
+        'dense1',
+        'dense_out',
+        'softmax_out',
+    ]
+    inp_tensor = full_keras_model.input
+    print('\n' + '=' * 60)
+    print('DIAGNOSTIC: HLS csim bisect — looking for signal collapse')
+    print('=' * 60)
+    for layer_name in probe_layers:
+        try:
+            out_tensor = full_keras_model.get_layer(layer_name).output
+        except ValueError:
+            print(f'  [diag] layer "{layer_name}" not found — skipping')
+            continue
+        probe_model = Model(inp_tensor, out_tensor, name=f'probe_{layer_name}')
+
+        # Keras reference
+        y_keras = probe_model.predict(X_input, verbose=0)
+        k_min, k_max, k_mean = float(y_keras.min()), float(y_keras.max()), float(y_keras.mean())
+
+        # HLS csim
+        probe_dir = str(Path(base_dir) / f'diag_{layer_name}')
+        if os.path.exists(probe_dir):
+            shutil.rmtree(probe_dir)
+        cfg = hls4ml.utils.config_from_keras_model(probe_model, granularity='name')
+        cfg['Model']['Strategy'] = 'resource'
+        cfg['Model']['ReuseFactor'] = 1
+        cfg['Model']['Precision'] = 'ap_fixed<32,16>'
+        # Mirror the same per-layer overrides used in run_model so the probe is truthful.
+        # Without this, dense_out stays ap_fixed<32,16> → softmax exp-table step=128 →
+        # all logits in [-8,+9] map to the same bucket → uniform softmax output.
+        if 'dense_out' in cfg.get('LayerName', {}):
+            cfg['LayerName']['dense_out']['Precision'] = 'ap_fixed<16,6>'
+        if 'softmax_out' in cfg.get('LayerName', {}):
+            cfg['LayerName']['softmax_out']['Implementation'] = 'stable'
+        try:
+            hls_probe = hls4ml.converters.convert_from_keras_model(
+                probe_model,
+                hls_config=cfg,
+                output_dir=probe_dir,
+                input_flat=False,
+                output_flat=False,
+                package_as_xo=False,
+                project_name=f'diag_{layer_name}',
+                **_HLS_PARAMS,
+            )
+            hls_probe.compile()
+            y_hls = hls_probe.predict(X_input)
+            h_min, h_max, h_mean = float(y_hls.min()), float(y_hls.max()), float(y_hls.mean())
+            # Check both mean closeness AND that HLS isn't suspiciously uniform (std≈0)
+            k_std = float(y_keras.std())
+            h_std = float(y_hls.std())
+            uniform_collapse = h_std < 1e-6 and k_std > 1e-3
+            mean_ok = abs(h_mean - k_mean) < 0.5 * (abs(k_mean) + 1e-6)
+            status = 'COLLAPSED(uniform)' if uniform_collapse else ('OK' if mean_ok else 'COLLAPSED')
+        except Exception as exc:
+            h_min = h_max = h_mean = float('nan')
+            status = f'ERROR({type(exc).__name__})'
+        print(
+            f'  [{layer_name:12s}]  '
+            f'keras=[{k_min:+.4f}, {k_max:+.4f}] mean={k_mean:+.4f}  '
+            f'hls=[{h_min:+.4f}, {h_max:+.4f}] mean={h_mean:+.4f}  {status}'
+        )
+    print('=' * 60 + '\n')
+
+
+# ===========================================================================
 # Helper: run one model through its designated hls4ml steps
 # ===========================================================================
 def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
@@ -244,8 +338,17 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
     with timed_step(key, '2. hls4ml config'):
         cfg = hls4ml.utils.config_from_keras_model(keras_model, granularity='name')
         cfg['Model']['Strategy'] = 'resource'
-        cfg['Model']['ReuseFactor'] = 8
-        cfg['Model']['Precision'] = 'ap_fixed<4,2>'
+        cfg['Model']['ReuseFactor'] = 1
+        cfg['Model']['Precision'] = 'ap_fixed<32,16>'
+        # Narrow logit precision so softmax exp-table covers [-32,+32] not [-32768,+32768].
+        # With ap_fixed<32,16> the 1024-entry table has ~64-unit buckets; all logits in
+        # [-4,+4] land in the same bucket → exp(all)=equal → softmax=[0.25,0.25,0.25,0.25].
+        # ap_fixed<16,6> gives range [-32,+32] with 10 fractional bits (res=2^-10≈0.001).
+        if 'dense_out' in cfg.get('LayerName', {}):
+            cfg['LayerName']['dense_out']['Precision'] = 'ap_fixed<16,6>'
+        # stable softmax subtracts max before exp, so table only needs to cover [-range,0]
+        if 'softmax_out' in cfg.get('LayerName', {}):
+            cfg['LayerName']['softmax_out']['Implementation'] = 'stable'
 
     # ---- step 3: convert ----
     with timed_step(key, '3. convert_from_keras_model'):
@@ -310,6 +413,12 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
         np.save(os.path.join(output_dir, 'y_pred_hls.npy'), y_hls_r)
         np.save(os.path.join(output_dir, 'y_pred_keras.npy'), y_keras)
         print(f'  [{key}] Results saved to {output_dir}')
+
+        n_show = min(100, len(y_hls_r))
+        print(f'  [{key}] y_pred_keras (first {n_show}):')
+        print(y_keras[:n_show])
+        print(f'  [{key}] y_pred_hls (first {n_show}):')
+        print(y_hls_r[:n_show])
     else:
         print(f'  [{key}] Skipping predict/save — compile did not succeed.')
 
@@ -328,6 +437,8 @@ print('\n' + '=' * 60)
 print('MODEL 1/3: full  (input_flat=False, output_flat=False)  [FULL RUN]')
 print('=' * 60)
 run_model('full', full_model, X_full, input_flat=False, output_flat=False, full_run=True)
+
+_diag_hls_bisect(full_model, X_full, str(_BASE / 'diag'))
 
 print('\n' + '=' * 60)
 print('MODEL 2/3: first_half  (input_flat=False, output_flat=True)  [STOP AFTER COMPILE]')

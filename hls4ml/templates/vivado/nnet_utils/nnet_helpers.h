@@ -163,18 +163,18 @@ template <class srcType, class dstType, size_t SIZE> void convert_data(hls::stre
 }
 
 template <class srcType, typename dstType, size_t SIZE>
-void convert_data_axis(srcType *src, hls::stream<hls::axis<float, 0, 0, 0>> &dst) {
+void convert_data_axis(srcType *src, hls::stream<hls::axis<float, 0, 0, 0, 24>> &dst) {
     for (size_t i = 0; i < SIZE; i++) {
-        hls::axis<float, 0, 0, 0> ctype;
+        hls::axis<float, 0, 0, 0, 24> ctype;
         ctype.data = dstType(src[i]);
         dst.write(ctype);
     }
 }
 
 template <class srcType, typename dstType, size_t SIZE>
-void convert_data_axis(std::vector<srcType> &src, hls::stream<hls::axis<float, 0, 0, 0>> &dst) {
+void convert_data_axis(std::vector<srcType> &src, hls::stream<hls::axis<float, 0, 0, 0, 24>> &dst) {
     for (auto i = 0; i < SIZE; i++) {
-        hls::axis<float, 0, 0, 0> pack;
+        hls::axis<float, 0, 0, 0, 24> pack;
         pack.data = src[i];
         if (i == SIZE - 1) {
             pack.last = 1;
@@ -186,9 +186,9 @@ void convert_data_axis(std::vector<srcType> &src, hls::stream<hls::axis<float, 0
 }
 
 template <typename srcType, class dstType, size_t SIZE>
-void convert_data_axis(hls::stream<hls::axis<float, 0, 0, 0>> &src, dstType *dst) {
+void convert_data_axis(hls::stream<hls::axis<float, 0, 0, 0, 24>> &src, dstType *dst) {
     for (size_t i = 0; i < SIZE; i++) {
-        hls::axis<float, 0, 0, 0> ctype = src.read();
+        hls::axis<float, 0, 0, 0, 24> ctype = src.read();
         dst[i] = dstType(ctype.data);
     }
 }
