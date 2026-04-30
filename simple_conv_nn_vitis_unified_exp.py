@@ -29,8 +29,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
+import tensorflow as tf
 from keras.src.layers import GlobalAveragePooling2D, UpSampling2D
-from tensorflow.keras.layers import Activation, Conv2D, Dense, Input, MaxPooling2D
+from tensorflow.keras.layers import Conv2D, Dense, Input, MaxPooling2D
 from tensorflow.keras.models import Model
 
 import hls4ml
@@ -40,6 +41,11 @@ import hls4ml
 # ===========================================================================
 NUM_QUERIES = 10  # samples to actually run this build (must be <= MAX_QUERIES)
 MAX_QUERIES = 1_000_000  # total size of the locked input pool (~256 MB on disk)
+HLS_REUSE_FACTOR = 8  # DSP reuse factor for all layers
+HLS_PRECISION = 'ap_fixed<16,6>'  # model-level default: weights + internal accumulators
+HLS_OUT_PRECISION = 'ap_fixed<16,2>'  # conv/pool outputs: range ±2, 14 fractional bits (res≈0.00006)
+HLS_GAP_PRECISION = 'ap_fixed<32,16>'  # GAP/Dense: 32-bit, range ±32768, 16 fractional bits
+# wide enough for any activation range + fine enough for small values
 
 # ===========================================================================
 # Paths
@@ -120,6 +126,9 @@ print('\n' + '=' * 60)
 print('Building Keras models...')
 print('=' * 60)
 
+
+tf.random.set_seed(0)  # lock weight initialisation so activation ranges are reproducible
+
 with timed_step('full', '1. Keras model definition'):
     inp = Input(shape=(8, 8, 1), name='inp')
 
@@ -144,8 +153,7 @@ with timed_step('full', '1. Keras model definition'):
     # -------- Head --------
     y = GlobalAveragePooling2D(name='gap')(y)
     y = Dense(64, activation='relu', name='dense1')(y)
-    y = Dense(4, activation=None, name='dense_out')(y)
-    full_out = Activation('softmax', name='softmax_out')(y)
+    full_out = Dense(4, activation=None, name='dense_out')(y)
 
     full_model = Model(inp, full_out, name='full_model')
     full_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
@@ -181,7 +189,6 @@ z = full_model.get_layer('dec_conv2')(z)
 z = full_model.get_layer('gap')(z)
 z = full_model.get_layer('dense1')(z)
 z = full_model.get_layer('dense_out')(z)
-z = full_model.get_layer('softmax_out')(z)
 second_half_model = Model(sec_inp, z, name='second_half')
 second_half_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
@@ -257,7 +264,6 @@ def _diag_hls_bisect(full_keras_model, X_input, base_dir):
         'gap',
         'dense1',
         'dense_out',
-        'softmax_out',
     ]
     inp_tensor = full_keras_model.input
     print('\n' + '=' * 60)
@@ -281,15 +287,13 @@ def _diag_hls_bisect(full_keras_model, X_input, base_dir):
             shutil.rmtree(probe_dir)
         cfg = hls4ml.utils.config_from_keras_model(probe_model, granularity='name')
         cfg['Model']['Strategy'] = 'resource'
-        cfg['Model']['ReuseFactor'] = 1
-        cfg['Model']['Precision'] = 'ap_fixed<32,16>'
-        # Mirror the same per-layer overrides used in run_model so the probe is truthful.
-        # Without this, dense_out stays ap_fixed<32,16> → softmax exp-table step=128 →
-        # all logits in [-8,+9] map to the same bucket → uniform softmax output.
-        if 'dense_out' in cfg.get('LayerName', {}):
-            cfg['LayerName']['dense_out']['Precision'] = 'ap_fixed<16,6>'
-        if 'softmax_out' in cfg.get('LayerName', {}):
-            cfg['LayerName']['softmax_out']['Implementation'] = 'stable'
+        cfg['Model']['ReuseFactor'] = HLS_REUSE_FACTOR
+        cfg['Model']['Precision'] = HLS_PRECISION
+        for _ln in cfg.get('LayerName', {}):
+            if any(p in _ln.lower() for p in ('dense', 'gap')):
+                cfg['LayerName'][_ln]['Precision'] = HLS_GAP_PRECISION
+            else:
+                cfg['LayerName'][_ln]['Precision'] = HLS_OUT_PRECISION
         try:
             hls_probe = hls4ml.converters.convert_from_keras_model(
                 probe_model,
@@ -338,17 +342,13 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
     with timed_step(key, '2. hls4ml config'):
         cfg = hls4ml.utils.config_from_keras_model(keras_model, granularity='name')
         cfg['Model']['Strategy'] = 'resource'
-        cfg['Model']['ReuseFactor'] = 1
-        cfg['Model']['Precision'] = 'ap_fixed<32,16>'
-        # Narrow logit precision so softmax exp-table covers [-32,+32] not [-32768,+32768].
-        # With ap_fixed<32,16> the 1024-entry table has ~64-unit buckets; all logits in
-        # [-4,+4] land in the same bucket → exp(all)=equal → softmax=[0.25,0.25,0.25,0.25].
-        # ap_fixed<16,6> gives range [-32,+32] with 10 fractional bits (res=2^-10≈0.001).
-        if 'dense_out' in cfg.get('LayerName', {}):
-            cfg['LayerName']['dense_out']['Precision'] = 'ap_fixed<16,6>'
-        # stable softmax subtracts max before exp, so table only needs to cover [-range,0]
-        if 'softmax_out' in cfg.get('LayerName', {}):
-            cfg['LayerName']['softmax_out']['Implementation'] = 'stable'
+        cfg['Model']['ReuseFactor'] = HLS_REUSE_FACTOR
+        cfg['Model']['Precision'] = HLS_PRECISION
+        for _ln in cfg.get('LayerName', {}):
+            if any(p in _ln.lower() for p in ('dense', 'gap')):
+                cfg['LayerName'][_ln]['Precision'] = HLS_GAP_PRECISION
+            else:
+                cfg['LayerName'][_ln]['Precision'] = HLS_OUT_PRECISION
 
     # ---- step 3: convert ----
     with timed_step(key, '3. convert_from_keras_model'):
