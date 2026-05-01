@@ -41,7 +41,7 @@ import hls4ml
 # ===========================================================================
 NUM_QUERIES = 10  # samples to actually run this build (must be <= MAX_QUERIES)
 MAX_QUERIES = 1_000_000  # total size of the locked input pool (~256 MB on disk)
-HLS_REUSE_FACTOR = 8  # DSP reuse factor for all layers
+HLS_REUSE_FACTOR = 16  # DSP reuse factor for all layers
 HLS_PRECISION = 'ap_fixed<16,6>'  # model-level default: weights + internal accumulators
 HLS_OUT_PRECISION = 'ap_fixed<16,2>'  # conv/pool outputs: range ±2, 14 fractional bits (res≈0.00006)
 HLS_GAP_PRECISION = 'ap_fixed<32,16>'  # GAP/Dense: 32-bit, range ±32768, 16 fractional bits
@@ -133,26 +133,26 @@ with timed_step('full', '1. Keras model definition'):
     inp = Input(shape=(8, 8, 1), name='inp')
 
     # -------- Encoder --------
-    x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv1')(inp)
+    x = Conv2D(8, (3, 3), padding='same', activation='relu', name='enc_conv1')(inp)
     x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv2')(x)
     x = MaxPooling2D((2, 2), name='enc_pool1')(x)  # 8 → 4
 
-    x = Conv2D(32, (3, 3), padding='same', activation='relu', name='enc_conv3')(x)
-    x = Conv2D(32, (3, 3), padding='same', activation='relu', name='enc_conv4')(x)
+    x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv3')(x)
+    # x = Conv2D(32, (3, 3), padding='same', activation='relu', name='enc_conv4')(x)
     x = MaxPooling2D((2, 2), name='enc_pool2')(x)  # 4 → 2
 
     # -------- Bottleneck  (split point between first and second half) --------
-    bottleneck_out = Conv2D(64, (3, 3), padding='same', activation='relu', name='bottleneck')(x)  # (2, 2, 64)
+    bottleneck_out = Conv2D(16, (3, 3), padding='same', activation='relu', name='bottleneck')(x)  # (2, 2, 16)
 
     # -------- Decoder --------
     y = UpSampling2D((2, 2), name='dec_up1')(bottleneck_out)  # 2 → 4
-    y = Conv2D(32, (3, 3), padding='same', activation='relu', name='dec_conv1')(y)
+    y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv1')(y)
     y = UpSampling2D((2, 2), name='dec_up2')(y)  # 4 → 8
-    y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv2')(y)
+    y = Conv2D(8, (3, 3), padding='same', activation='relu', name='dec_conv2')(y)
 
     # -------- Head --------
     y = GlobalAveragePooling2D(name='gap')(y)
-    y = Dense(64, activation='relu', name='dense1')(y)
+    y = Dense(16, activation='relu', name='dense1')(y)
     full_out = Dense(4, activation=None, name='dense_out')(y)
 
     full_model = Model(inp, full_out, name='full_model')
@@ -181,7 +181,7 @@ first_half_model.compile(optimizer='adam', loss='mse')
 # Second-half sub-model: re-wire decoder/head layers through a fresh input tensor.
 # Calling an existing layer with a new tensor creates a new graph node but
 # reuses the same weight tensors — standard Keras weight-sharing pattern.
-sec_inp = Input(shape=(2, 2, 64), name='sec_inp')
+sec_inp = Input(shape=(2, 2, 16), name='sec_inp')
 z = full_model.get_layer('dec_up1')(sec_inp)
 z = full_model.get_layer('dec_conv1')(z)
 z = full_model.get_layer('dec_up2')(z)
@@ -254,7 +254,7 @@ def _diag_hls_bisect(full_keras_model, X_input, base_dir):
         'enc_conv2',
         'enc_pool1',
         'enc_conv3',
-        'enc_conv4',
+        # 'enc_conv4',
         'enc_pool2',
         'bottleneck',
         'dec_up1',
