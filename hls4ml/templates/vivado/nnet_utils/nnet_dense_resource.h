@@ -30,7 +30,8 @@ void dense_resource_rf_leq_nin(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::
     #pragma HLS ARRAY_PARTITION variable=biases complete
 
     if (CONFIG_T::reuse_factor > 1) {
-        #pragma HLS RESOURCE variable=weights core=ROM_nP_BRAM
+        // #pragma HLS RESOURCE variable=weights core=ROM_nP_BRAM
+        #pragma HLS RESOURCE variable=weights core=ROM_1P_LUTRAM
     }
 
     typename CONFIG_T::accum_t acc[CONFIG_T::n_out];

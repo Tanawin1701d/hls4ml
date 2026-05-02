@@ -41,7 +41,7 @@ import hls4ml
 # ===========================================================================
 NUM_QUERIES = 10  # samples to actually run this build (must be <= MAX_QUERIES)
 MAX_QUERIES = 1_000_000  # total size of the locked input pool (~256 MB on disk)
-HLS_REUSE_FACTOR = 16  # DSP reuse factor for all layers
+HLS_REUSE_FACTOR = 8  # DSP reuse factor for all layers
 HLS_PRECISION = 'ap_fixed<16,6>'  # model-level default: weights + internal accumulators
 HLS_OUT_PRECISION = 'ap_fixed<16,2>'  # conv/pool outputs: range ±2, 14 fractional bits (res≈0.00006)
 HLS_GAP_PRECISION = 'ap_fixed<32,16>'  # GAP/Dense: 32-bit, range ±32768, 16 fractional bits
@@ -350,7 +350,11 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
             else:
                 cfg['LayerName'][_ln]['Precision'] = HLS_OUT_PRECISION
 
+        if full_run:
+            cfg['Flows'] = ['vitisunified:fifo_depth_optimization']
+
     # ---- step 3: convert ----
+
     with timed_step(key, '3. convert_from_keras_model'):
         hls_model = hls4ml.converters.convert_from_keras_model(
             keras_model,
