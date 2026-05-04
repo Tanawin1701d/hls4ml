@@ -22,6 +22,7 @@ CONFIG
   Edit NUM_QUERIES and MAX_QUERIES in the USER CONFIG block below.
 """
 
+import argparse
 import os
 import shutil
 import time
@@ -37,9 +38,28 @@ from tensorflow.keras.models import Model
 import hls4ml
 
 # ===========================================================================
+# CLI
+# ===========================================================================
+_parser = argparse.ArgumentParser(description='Conv NN hls4ml experiment')
+_parser.add_argument(
+    '--mode',
+    choices=['all', 'full', 'first_half', 'second_half'],
+    default='all',
+    help='Which model variant(s) to run (default: all)',
+)
+_parser.add_argument(
+    '--diag',
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help='Run HLS bisect diagnostic after full model (default: enabled)',
+)
+_ARGS = _parser.parse_args()
+_RUN = {'full', 'first_half', 'second_half'} if _ARGS.mode == 'all' else {_ARGS.mode}
+
+# ===========================================================================
 # USER CONFIG
 # ===========================================================================
-NUM_QUERIES = 10  # samples to actually run this build (must be <= MAX_QUERIES)
+NUM_QUERIES = 20_000  # samples to actually run this build (must be <= MAX_QUERIES)
 MAX_QUERIES = 1_000_000  # total size of the locked input pool (~256 MB on disk)
 HLS_REUSE_FACTOR = 8  # DSP reuse factor for all layers
 HLS_PRECISION = 'ap_fixed<16,6>'  # model-level default: weights + internal accumulators
@@ -350,8 +370,8 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
             else:
                 cfg['LayerName'][_ln]['Precision'] = HLS_OUT_PRECISION
 
-        if full_run:
-            cfg['Flows'] = ['vitisunified:fifo_depth_optimization']
+        # if full_run:
+        #     cfg['Flows'] = ['vitisunified:fifo_depth_optimization']
 
     # ---- step 3: convert ----
 
@@ -418,7 +438,7 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
         np.save(os.path.join(output_dir, 'y_pred_keras.npy'), y_keras)
         print(f'  [{key}] Results saved to {output_dir}')
 
-        n_show = min(100, len(y_hls_r))
+        n_show = min(10, len(y_hls_r))
         print(f'  [{key}] y_pred_keras (first {n_show}):')
         print(y_keras[:n_show])
         print(f'  [{key}] y_pred_hls (first {n_show}):')
@@ -435,24 +455,29 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
 
 
 # ===========================================================================
-# Run all three models
+# Run selected model variant(s)
 # ===========================================================================
-print('\n' + '=' * 60)
-print('MODEL 1/3: full  (input_flat=False, output_flat=False)  [FULL RUN]')
-print('=' * 60)
-run_model('full', full_model, X_full, input_flat=False, output_flat=False, full_run=True)
+print(f'\nRunning mode: {_ARGS.mode}  → variants: {sorted(_RUN)}')
 
-_diag_hls_bisect(full_model, X_full, str(_BASE / 'diag'))
+if 'full' in _RUN:
+    print('\n' + '=' * 60)
+    print('MODEL full  (input_flat=False, output_flat=False)  [FULL RUN]')
+    print('=' * 60)
+    run_model('full', full_model, X_full, input_flat=False, output_flat=False, full_run=True)
+    if _ARGS.diag:
+        _diag_hls_bisect(full_model, X_full, str(_BASE / 'diag'))
 
-print('\n' + '=' * 60)
-print('MODEL 2/3: first_half  (input_flat=False, output_flat=True)  [STOP AFTER COMPILE]')
-print('=' * 60)
-run_model('first_half', first_half_model, X_full, input_flat=False, output_flat=True, full_run=False)
+if 'first_half' in _RUN:
+    print('\n' + '=' * 60)
+    print('MODEL first_half  (input_flat=False, output_flat=True)  [STOP AFTER COMPILE]')
+    print('=' * 60)
+    run_model('first_half', first_half_model, X_full, input_flat=False, output_flat=True, full_run=False)
 
-print('\n' + '=' * 60)
-print('MODEL 3/3: second_half  (input_flat=True, output_flat=False)  [STOP AFTER COMPILE]')
-print('=' * 60)
-run_model('second_half', second_half_model, X_second_half, input_flat=True, output_flat=False, full_run=False)
+if 'second_half' in _RUN:
+    print('\n' + '=' * 60)
+    print('MODEL second_half  (input_flat=True, output_flat=False)  [STOP AFTER COMPILE]')
+    print('=' * 60)
+    run_model('second_half', second_half_model, X_second_half, input_flat=True, output_flat=False, full_run=False)
 
 print('\n' + '=' * 60)
 print(f'Done.  Lock dir: {_LOCK}')
