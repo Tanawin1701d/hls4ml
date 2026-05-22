@@ -1,19 +1,33 @@
+# Python
 *.pyc
 _version.py
 __pycache__
+*.egg-info/
+
+# Build artifacts
 build/
 dist/
 sdist/
-*.egg-info/
-vivado_prj
-.vscode
-my-hls-test
 *.tar.gz
+
+# Docs
 docs/_build
 docs/autodoc/*
-hls4mlprj_*
-*~
-*.ipynb_checkpoints/
-*.bak
 
+# Editor / IDE
+.vscode
+/.idea/
+*~
+*.bak
+*.ipynb_checkpoints/
+
+# HLS / Vivado generated outputs
+vivado_prj
+my-hls-test
+hls4mlprj_*
+/hls4ml_output/diag/
+/hls4ml_output/_exp_locked/full_weights.h5
+/hls4ml_output/_exp_locked/x_input_1000000.npy
+
+# Test artifacts
 test/pytest/partialExp
