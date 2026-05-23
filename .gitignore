@@ -29,5 +29,7 @@ hls4mlprj_*
 /hls4ml_output/_exp_locked/full_weights.h5
 /hls4ml_output/_exp_locked/x_input_1000000.npy
 
+/hls4ml_output2
+
 # Test artifacts
 test/pytest/partialExp
