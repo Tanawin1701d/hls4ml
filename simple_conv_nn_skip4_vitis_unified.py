@@ -48,6 +48,12 @@ _parser.add_argument(
     default=True,
     help='HLS bisect diagnostic after full model (default: on)',
 )
+_parser.add_argument(
+    '--fifo',
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help='Enable FIFO depth optimization flow (vitisunified:fifo_depth_optimization) (default: disabled)',
+)
 _ARGS = _parser.parse_args()
 _RUN = {
     'all': {'full', 'part1', 'part2', 'part3', 'part4'},
@@ -86,7 +92,8 @@ _PROJECT_NAMES = {
 # ── SETUP ─────────────────────────────────────────────────────────────────────
 assert NUM_QUERIES <= MAX_QUERIES, f'NUM_QUERIES ({NUM_QUERIES}) > MAX_QUERIES ({MAX_QUERIES})'
 _LOCK.mkdir(parents=True, exist_ok=True)
-for _d in _DIRS.values():
+for _k in _RUN:
+    _d = _DIRS[_k]
     if os.path.exists(_d):
         shutil.rmtree(_d)
     os.makedirs(_d)
@@ -364,16 +371,23 @@ def _diag_hls_bisect(full_keras_model, X_input, base_dir) -> None:
 
 
 # ── RUN ONE PARTITION ─────────────────────────────────────────────────────────
-def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
-    """Convert → plot → compile → (predict + save if full_run)."""
+def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo=False):
+    """Convert → plot → compile → (predict + save if full_run).
+
+    fifo=True — enable vitisunified:fifo_depth_optimization flow.
+    """
     output_dir = _DIRS[key]
     x_shape = (
         '[' + ', '.join(str(a.shape) for a in X_input) + ']' if isinstance(X_input, (list, tuple)) else str(X_input.shape)
     )
-    _tlog_write(key, f'input_flat={input_flat}  output_flat={output_flat}  full_run={full_run}  X.shape={x_shape}\n')
+    _tlog_write(
+        key, f'input_flat={input_flat}  output_flat={output_flat}  full_run={full_run}  fifo={fifo}  X.shape={x_shape}\n'
+    )
 
     with timed_step(key, '2. hls4ml config'):
         cfg = _make_hls_cfg(keras_model)
+        if full_run and fifo:
+            cfg['Flows'] = ['vitisunified:fifo_depth_optimization']
 
     with timed_step(key, '3. convert_from_keras_model'):
         hls_model = hls4ml.converters.convert_from_keras_model(
@@ -401,7 +415,9 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run):
         try:
             hls_model.compile()
             compile_ok = True
-        except Exception as exc:
+        except OSError as exc:
+            if '.so' not in str(exc) or 'cannot open shared object file' not in str(exc):
+                raise
             compile_ok = False
             _tlog_write(key, f'[COMPILE ERROR] {type(exc).__name__}: {exc}')
             print(f'  [{key}] compile raised (caught): {type(exc).__name__}: {exc}')
@@ -443,7 +459,7 @@ _LABELS = {
     'part4': 'Part 4 Decoder-B  (in=True,  out=False)  [STOP AFTER COMPILE]',
 }
 
-print(f'\nRunning mode: {_ARGS.mode}  → variants: {sorted(_RUN)}')
+print(f'\nRunning mode: {_ARGS.mode}  → variants: {sorted(_RUN)}  fifo={_ARGS.fifo}')
 for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
     if _key not in _RUN:
         continue
@@ -451,7 +467,15 @@ for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
     print(f'MODEL {_LABELS[_key]}')
     print('=' * 60)
     _cfg = _PART_CFG[_key]
-    run_model(_key, _cfg['keras_model'], _cfg['X_input'], _cfg['input_flat'], _cfg['output_flat'], _cfg['full_run'])
+    run_model(
+        _key,
+        _cfg['keras_model'],
+        _cfg['X_input'],
+        _cfg['input_flat'],
+        _cfg['output_flat'],
+        _cfg['full_run'],
+        fifo=_ARGS.fifo,
+    )
     if _key == 'full' and _ARGS.diag:
         _diag_hls_bisect(full_model, X_full, str(_BASE / 'diag'))
 

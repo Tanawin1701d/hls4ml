@@ -6,6 +6,6 @@
 
 // hls-fpga-machine-learning insert definitions
 
-void MY_PROJECT_TOP_FUNC(hls::stream<MY_DMA_PACKET_TYPE_INPUT> &axi_input_stream,
-                         hls::stream<MY_DMA_PACKET_TYPE_OUTPUT> &axi_output_stream, int batch_size);
+// hls-fpga-machine-learning insert top-func-decl-h
+
 #endif

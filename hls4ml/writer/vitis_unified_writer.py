@@ -94,6 +94,16 @@ class VitisUnifiedWriter(VitisWriter):
         direction = 'in' if is_input else 'out'
         return f'stream_{direction}{idx}_{tensor_var.name}'
 
+    def _get_axis_model_stream_name(self, is_input: bool, idx: int) -> str:
+        """Name of the internal HLS stream connecting load/compute/store for AXIS wrapper."""
+        direction = 'input' if is_input else 'output'
+        return f'model_{direction}_stream_{idx}'
+
+    def _get_axis_axi_port_name(self, is_input: bool, idx: int) -> str:
+        """Name of the top-function AXI-stream port for AXIS wrapper."""
+        direction = 'input' if is_input else 'output'
+        return f'axi_{direction}_stream_{idx}'
+
     def _get_dma_float_type_name(self):
         return 'dma_data_packet'
 
@@ -295,6 +305,9 @@ fi
 
     # ===== Bridge generation =====
     def write_bridge(self, model):
+        if self._is_axi_flat_input() or self._is_axi_flat_output():
+            return
+
         filedir = os.path.dirname(os.path.abspath(__file__))
         with (
             open(os.path.join(filedir, '../templates/vitis_unified/myproject_bridge.cpp')) as fin,
@@ -388,105 +401,183 @@ fi
 
     def _write_wrapper_axis(self, model):
         inp_gmem_t, out_gmem_t, inputs, outputs = self.vitis_unified_config.get_corrected_types()
-        if len(inputs) != 1 or len(outputs) != 1:
+        is_flat_in = self._is_axi_flat_input()
+        is_flat_out = self._is_axi_flat_output()
+
+        # Non-flat sides must still have exactly 1 port
+        if not is_flat_in and len(inputs) != 1:
             raise ValueError(
-                'AXIS wrapper requires exactly 1 input and 1 output port. '
-                f'Found {len(inputs)} inputs and {len(outputs)} outputs.'
+                f'AXIS wrapper requires exactly 1 input port when input_flat=False. Found {len(inputs)} inputs.'
+            )
+        if not is_flat_out and len(outputs) != 1:
+            raise ValueError(
+                f'AXIS wrapper requires exactly 1 output port when output_flat=False. Found {len(outputs)} outputs.'
             )
 
-        inp, out = inputs[0], outputs[0]
         indent = '    '
         filedir = os.path.dirname(os.path.abspath(__file__))
 
+        # ── pre-compute all port / stream names ──────────────────────────────
+        # Per-port AXI packet types: flat ports use an indexed typedef per layer type;
+        # non-flat side uses the single float packet type.
+        in_dma_types = [
+            (f'dma_input_flat_data_packet_{i}' if is_flat_in else self._get_dma_float_type_name())
+            for i in range(len(inputs))
+        ]
+        out_dma_types = [
+            (f'dma_output_flat_data_packet_{i}' if is_flat_out else self._get_dma_float_type_name())
+            for i in range(len(outputs))
+        ]
+
+        axi_in_ports = [self._get_axis_axi_port_name(True, i) for i in range(len(inputs))]
+        axi_out_ports = [self._get_axis_axi_port_name(False, i) for i in range(len(outputs))]
+        model_in_streams = [self._get_axis_model_stream_name(True, i) for i in range(len(inputs))]
+        model_out_streams = [self._get_axis_model_stream_name(False, i) for i in range(len(outputs))]
+        all_model_streams = model_in_streams + model_out_streams
+
+        # ── top-function signature (shared between .cpp and .h) ──────────────
+        top_func_name = self._get_top_wrap_func_name(model, False)
+        sig_params = [f'hls::stream<{in_dma_types[i]}> &{axi_in_ports[i]}' for i in range(len(inputs))] + [
+            f'hls::stream<{out_dma_types[i]}> &{axi_out_ports[i]}' for i in range(len(outputs))
+        ]
+        sig_body = ',\n'.join(f'{indent}{p}' for p in sig_params)
+        top_func_decl_cpp = f'void {top_func_name}(\n{sig_body},\n{indent}int batch_size) {{\n'
+        top_func_decl_h = f'void {top_func_name}(\n{sig_body},\n{indent}int batch_size);\n'
+
+        # ── compute-streams string (inside MY_PROJECT call and compute() call) ─
+        compute_streams_str = ', '.join(all_model_streams)
+        compute_call_args_str = compute_streams_str + ', batch_size'
+
+        # ── per-port load / store call blocks ────────────────────────────────
+        if is_flat_in:
+            load_calls = ''.join(
+                f'{indent}load_input_flat<N_IN_{i}>({axi_in_ports[i]}, {model_in_streams[i]}, batch_size);\n'
+                for i in range(len(inputs))
+            )
+        else:
+            load_calls = f'{indent}load_input({axi_in_ports[0]}, {model_in_streams[0]}, batch_size);\n'
+
+        if is_flat_out:
+            store_calls = ''.join(
+                f'{indent}store_result_flat<N_OUT_{i}>({model_out_streams[i]}, {axi_out_ports[i]}, batch_size);\n'
+                for i in range(len(outputs))
+            )
+        else:
+            store_calls = f'{indent}store_result({model_out_streams[0]}, {axi_out_ports[0]}, batch_size);\n'
+
+        # ── generate .cpp ─────────────────────────────────────────────────────
         with (
             open(os.path.join(filedir, '../templates/vitis_unified/myproject_axi_stream.cpp')) as fin,
             open(f'{model.config.get_output_dir()}/firmware/{self._get_project_name(model)}_axi_stream.cpp', 'w') as fout,
         ):
             for line in fin.readlines():
                 newline = line
-                if 'MY_PROJECT_TOP_FUNC' in newline:
-                    newline = newline.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
+
+                # project name (must run before compute-streams so MY_PROJECT( is renamed first)
                 if 'MY_PROJECT(' in newline:
                     newline = newline.replace('MY_PROJECT', self._get_project_name(model))
+
                 if '// hls-fpga-machine-learning insert include' in newline:
                     newline = f'#include "{self._get_project_name(model)}_axi_stream.h"\n'
+
+                if '// hls-fpga-machine-learning insert top-func-decl' in newline:
+                    newline = top_func_decl_cpp
+
                 if '// hls-fpga-machine-learning insert interface' in newline:
-                    newline = (
-                        indent
-                        + '#pragma HLS INTERFACE axis port=axi_input_stream\n'
-                        + indent
-                        + '#pragma HLS INTERFACE axis port=axi_output_stream\n'
-                        + indent
-                        + '#pragma HLS INTERFACE s_axilite port=return bundle=control\n'
-                        + indent
-                        + '#pragma HLS INTERFACE s_axilite port=batch_size bundle=control\n'
-                    )
-                if '// hls-fpga-machine-learning insert stream decl' in newline:
-                    in_depth = model.get_input_variables()[0].pragma[1]
-                    out_depth = model.get_output_variables()[0].pragma[1]
-                    newline = ''
-                    newline += indent + f'static hls::stream<{inp.type.name}> model_input_stream("model_input");\n'
-                    newline += indent + f'static hls::stream<{out.type.name}> model_output_stream("model_output");\n\n'
-                    newline += indent + f'#pragma HLS STREAM variable=model_input_stream depth={in_depth}\n'
-                    newline += indent + f'#pragma HLS STREAM variable=model_output_stream depth={out_depth}\n'
-                if '// hls-fpga-machine-learning insert stream parameter' in newline:
-                    newline = newline.replace(
-                        '// hls-fpga-machine-learning insert stream parameter',
-                        f'hls::stream<{inp.type.name}> &model_input_stream, '
-                        f'hls::stream<{out.type.name}> &model_output_stream',
+                    newline = ''.join(f'{indent}#pragma HLS INTERFACE axis port={p}\n' for p in axi_in_ports + axi_out_ports)
+                    newline += (
+                        f'{indent}#pragma HLS INTERFACE s_axilite port=return bundle=control\n'
+                        f'{indent}#pragma HLS INTERFACE s_axilite port=batch_size bundle=control\n'
                     )
 
+                if '// hls-fpga-machine-learning insert stream decl' in newline:
+                    newline = ''
+                    for i, inp in enumerate(inputs):
+                        newline += (
+                            f'{indent}static hls::stream<{inp.type.name}> {model_in_streams[i]}("{model_in_streams[i]}");\n'
+                        )
+                    for i, out in enumerate(outputs):
+                        newline += (
+                            f'{indent}static hls::stream<{out.type.name}> '
+                            f'{model_out_streams[i]}("{model_out_streams[i]}");\n'
+                        )
+                    newline += '\n'
+                    for i, inp in enumerate(inputs):
+                        newline += f'{indent}#pragma HLS STREAM variable={model_in_streams[i]} depth={inp.pragma[1]}\n'
+                    for i, out in enumerate(outputs):
+                        newline += f'{indent}#pragma HLS STREAM variable={model_out_streams[i]} depth={out.pragma[1]}\n'
+
+                if '// hls-fpga-machine-learning insert stream parameter' in newline:
+                    stream_params = ', '.join(
+                        [f'hls::stream<{inp.type.name}> &{model_in_streams[i]}' for i, inp in enumerate(inputs)]
+                        + [f'hls::stream<{out.type.name}> &{model_out_streams[i]}' for i, out in enumerate(outputs)]
+                    )
+                    newline = newline.replace('// hls-fpga-machine-learning insert stream parameter', stream_params)
+
+                if '// hls-fpga-machine-learning insert compute-streams' in newline:
+                    newline = newline.replace('// hls-fpga-machine-learning insert compute-streams', compute_streams_str)
+
+                if '// hls-fpga-machine-learning insert load-calls' in newline:
+                    newline = load_calls
+
+                if '// hls-fpga-machine-learning insert compute-call-args' in newline:
+                    newline = newline.replace('// hls-fpga-machine-learning insert compute-call-args', compute_call_args_str)
+
+                if '// hls-fpga-machine-learning insert store-calls' in newline:
+                    newline = store_calls
+
+                # single-token substitutions (used by non-flat helper functions in the template)
                 if 'INPUT_LAYER_TYPE' in newline:
-                    newline = newline.replace('INPUT_LAYER_TYPE', inp.type.name)
+                    newline = newline.replace('INPUT_LAYER_TYPE', inputs[0].type.name)
                 if 'OUTPUT_LAYER_TYPE' in newline:
-                    newline = newline.replace('OUTPUT_LAYER_TYPE', out.type.name)
+                    newline = newline.replace('OUTPUT_LAYER_TYPE', outputs[0].type.name)
                 if 'OUTPUT_GMEM_TYPE' in newline:
                     newline = newline.replace('OUTPUT_GMEM_TYPE', out_gmem_t)
-                if 'MY_DMA_PACKET_TYPE_INPUT' in newline:
-                    newline = newline.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
-                if 'MY_DMA_PACKET_TYPE_OUTPUT' in newline:
-                    newline = newline.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
-                if 'load_input_IS_FLAT' in newline:
-                    newline = newline.replace('_IS_FLAT', '_flat' if self._is_axi_flat_input() else '')
-                if 'store_result_IS_FLAT' in newline:
-                    newline = newline.replace('_IS_FLAT', '_flat' if self._is_axi_flat_output() else '')
 
                 fout.write(newline)
 
+        # ── generate .h ───────────────────────────────────────────────────────
         with (
             open(os.path.join(filedir, '../templates/vitis_unified/myproject_axi_stream.h')) as fin,
             open(f'{model.config.get_output_dir()}/firmware/{self._get_project_name(model)}_axi_stream.h', 'w') as fout,
         ):
             for line in fin.readlines():
                 newline = line
+
                 if 'MYPROJECT' in newline:
                     newline = newline.replace('MYPROJECT', self._get_project_name(model).upper())
+
                 if '// hls-fpga-machine-learning insert include' in newline:
                     newline = f'#include "{self._get_project_name(model)}.h"\n#include "ap_axi_sdata.h"\n'
-                if 'MY_PROJECT_TOP_FUNC' in newline:
-                    newline = newline.replace('MY_PROJECT_TOP_FUNC', self._get_top_wrap_func_name(model, False))
+
                 if '// hls-fpga-machine-learning insert definitions' in newline:
                     newline = ''
-                    newline += f'static const unsigned N_IN = {inp.size()};\n'
-                    newline += f'static const unsigned N_OUT = {out.size()};\n'
+                    for i, inp in enumerate(inputs):
+                        newline += f'static const unsigned N_IN_{i} = {inp.size()};\n'
+                    for i, out in enumerate(outputs):
+                        newline += f'static const unsigned N_OUT_{i} = {out.size()};\n'
+                    # Float (non-flat) packet type — shared by both sides
                     newline += (
                         f'typedef hls::axis<{inp_gmem_t}, 0, 0, 0, '
                         f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> {self._get_dma_float_type_name()};\n'
                     )
-                    newline += (
-                        f'typedef hls::axis<{self._get_dma_flat_template_name(True)}, 0, 0, 0, '
-                        f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
-                        f'{self._get_dma_flat_type_name(True)};\n'
-                    )
-                    newline += (
-                        f'typedef hls::axis<{self._get_dma_flat_template_name(False)}, 0, 0, 0, '
-                        f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
-                        f'{self._get_dma_flat_type_name(False)};\n'
-                    )
-                if 'MY_DMA_PACKET_TYPE_INPUT' in newline:
-                    newline = newline.replace('MY_DMA_PACKET_TYPE_INPUT', self._get_dma_type_name(True))
-                if 'MY_DMA_PACKET_TYPE_OUTPUT' in newline:
-                    newline = newline.replace('MY_DMA_PACKET_TYPE_OUTPUT', self._get_dma_type_name(False))
+                    # Per-port flat input typedefs — each keyed to its layer's type
+                    for i, inp in enumerate(inputs):
+                        newline += (
+                            f'typedef hls::axis<{inp.type.name}, 0, 0, 0, '
+                            f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
+                            f'dma_input_flat_data_packet_{i};\n'
+                        )
+                    # Per-port flat output typedefs — each keyed to its layer's type
+                    for i, out in enumerate(outputs):
+                        newline += (
+                            f'typedef hls::axis<{out.type.name}, 0, 0, 0, '
+                            f'(AXIS_ENABLE_KEEP | AXIS_ENABLE_LAST)> '
+                            f'dma_output_flat_data_packet_{i};\n'
+                        )
+
+                if '// hls-fpga-machine-learning insert top-func-decl-h' in newline:
+                    newline = top_func_decl_h
 
                 fout.write(newline)
 
@@ -667,6 +758,9 @@ fi
 
     # ===== Test generation =====
     def write_wrapper_test(self, model):
+        if self._is_axi_flat_input() or self._is_axi_flat_output():
+            return
+
         filedir = os.path.dirname(os.path.abspath(__file__))
         with (
             open(os.path.join(filedir, '../templates/vitis_unified/myproject_test.cpp')) as fin,
