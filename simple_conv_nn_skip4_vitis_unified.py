@@ -15,6 +15,7 @@ Lock dir: hls4ml_output/_exp_locked_skip4/
 """
 
 import argparse
+import json
 import os
 import shutil
 import time
@@ -89,6 +90,9 @@ _PROJECT_NAMES = {
     'part4': 'my_proj_skip4_p4',
 }
 
+# Path where the full-model FIFO optimization writes its results
+_FIFO_JSON_PATH = Path(_DIRS['full']) / 'fifo_depths.json'
+
 # ── SETUP ─────────────────────────────────────────────────────────────────────
 assert NUM_QUERIES <= MAX_QUERIES, f'NUM_QUERIES ({NUM_QUERIES}) > MAX_QUERIES ({MAX_QUERIES})'
 _LOCK.mkdir(parents=True, exist_ok=True)
@@ -97,6 +101,16 @@ for _k in _RUN:
     if os.path.exists(_d):
         shutil.rmtree(_d)
     os.makedirs(_d)
+
+# Guard: --fifo without the full model in this run requires a prior fifo_depths.json
+if _ARGS.fifo and 'full' not in _RUN:
+    if not _FIFO_JSON_PATH.exists():
+        raise FileNotFoundError(
+            f"--fifo requires the full model's fifo_depths.json to exist, but none was found at:\n"
+            f'  {_FIFO_JSON_PATH}\n'
+            f'Run with --mode all or --mode full --fifo first to generate it.'
+        )
+    print(f'[fifo] --fifo: will load existing fifo_depths.json ← {_FIFO_JSON_PATH}')
 
 os.environ['XILINX_VITIS'] = '/tools/Xilinx/Vitis/2023.2'
 os.environ['XILINX_VIVADO'] = '/tools/Xilinx/Vivado/2023.2'
@@ -370,18 +384,69 @@ def _diag_hls_bisect(full_keras_model, X_input, base_dir) -> None:
     print('=' * 60 + '\n')
 
 
-# ── RUN ONE PARTITION ─────────────────────────────────────────────────────────
-def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo=False):
-    """Convert → plot → compile → (predict + save if full_run).
+# ── FIFO DEPTH PROPAGATION HELPER ────────────────────────────────────────────
+def _apply_fifo_depths_from_full(key: str, hls_model, fifo_depths: dict) -> None:
+    """Apply full-model optimised FIFO depths to a sub-model's output_vars.
 
-    fifo=True — enable vitisunified:fifo_depth_optimization flow.
+    Walks ``hls_model.output_vars``, matches StreamVariable names against the
+    ``optimized`` depths recorded in *fifo_depths* (loaded from the full
+    model's ``fifo_depths.json``), and updates each matching pragma in-place.
+    Unmatched names get a warning.  A summary JSON is written to the sub-
+    model's output dir for traceability.
+
+    Args:
+        key (str): Partition key ('part1' … 'part4').
+        hls_model: The hls4ml ModelGraph returned by convert_from_keras_model.
+        fifo_depths (dict): Parsed ``fifo_depths.json`` from the full model.
+            Structure: ``{ "fifo_name": { "initial": X, "optimized": Y }, … }``
+    """
+    applied: dict[str, int] = {}
+
+    for output_var in hls_model.output_vars.values():
+        if 'StreamVariable' not in str(type(output_var)):
+            continue
+        if not output_var.pragma:
+            continue
+
+        fifo_name = output_var.name
+        if fifo_name in fifo_depths:
+            optimized_depth = fifo_depths[fifo_name]['optimized']
+            output_var.pragma = (output_var.pragma[0], optimized_depth)
+            applied[fifo_name] = optimized_depth
+            _tlog_write(key, f'[fifo] applied depth={optimized_depth} → {fifo_name}')
+        else:
+            print(f'  [{key}][fifo] WARNING: "{fifo_name}" not in full-model fifo_depths.json — skipping')
+            _tlog_write(key, f'[fifo] WARNING: "{fifo_name}" not found in full-model JSON — skipped')
+
+    # Write per-partition traceability file
+    applied_path = os.path.join(_DIRS[key], 'fifo_depths_applied.json')
+    with open(applied_path, 'w') as f:
+        json.dump(applied, f, indent=4)
+    print(f'  [{key}][fifo] {len(applied)} FIFO depth(s) applied from full model → {applied_path}')
+    _tlog_write(key, f'[fifo] {len(applied)} depth(s) written → {applied_path}')
+
+
+# ── RUN ONE PARTITION ─────────────────────────────────────────────────────────
+def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo=False, fifo_depths=None):
+    """Convert → plot → (apply FIFO depths) → compile → (predict + save if full_run).
+
+    Args:
+        fifo (bool): Enable ``vitisunified:fifo_depth_optimization`` flow on the
+            **full** model so Vitis profiles and writes ``fifo_depths.json``.
+        fifo_depths (dict | None): Pre-loaded optimised depths from the full
+            model's ``fifo_depths.json``.  When provided the depths are applied
+            to this sub-model's output_vars *after* conversion and *before*
+            compile, using the same pragma-update mechanism as the upstream
+            ``set_optimized_fifo_depths`` pass.
     """
     output_dir = _DIRS[key]
     x_shape = (
         '[' + ', '.join(str(a.shape) for a in X_input) + ']' if isinstance(X_input, (list, tuple)) else str(X_input.shape)
     )
     _tlog_write(
-        key, f'input_flat={input_flat}  output_flat={output_flat}  full_run={full_run}  fifo={fifo}  X.shape={x_shape}\n'
+        key,
+        f'input_flat={input_flat}  output_flat={output_flat}  full_run={full_run}  '
+        f'fifo={fifo}  fifo_depths_provided={fifo_depths is not None}  X.shape={x_shape}\n',
     )
 
     with timed_step(key, '2. hls4ml config'):
@@ -400,6 +465,11 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo
             project_name=_PROJECT_NAMES[key],
             **_HLS_PARAMS,
         )
+
+    # Apply optimised FIFO depths from the full model (sub-models only)
+    if fifo_depths is not None and not full_run:
+        with timed_step(key, '3b. apply full-model FIFO depths'):
+            _apply_fifo_depths_from_full(key, hls_model, fifo_depths)
 
     with timed_step(key, '4. plot_model'):
         hls4ml.utils.plot_model(
@@ -460,6 +530,15 @@ _LABELS = {
 }
 
 print(f'\nRunning mode: {_ARGS.mode}  → variants: {sorted(_RUN)}  fifo={_ARGS.fifo}')
+
+# When --fifo is active and 'full' is NOT being run this session, load the
+# pre-existing fifo_depths.json produced by a prior full run.
+_fifo_depths: dict | None = None
+if _ARGS.fifo and 'full' not in _RUN:
+    with open(_FIFO_JSON_PATH) as _fj:
+        _fifo_depths = json.load(_fj)
+    print(f'[fifo] Loaded {len(_fifo_depths)} FIFO entries ← {_FIFO_JSON_PATH}')
+
 for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
     if _key not in _RUN:
         continue
@@ -475,7 +554,22 @@ for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
         _cfg['output_flat'],
         _cfg['full_run'],
         fifo=_ARGS.fifo,
+        fifo_depths=_fifo_depths,
     )
+
+    # After the full model completes, load its fifo_depths.json so sub-models
+    # can inherit the optimised depths for the rest of this session.
+    if _key == 'full' and _ARGS.fifo:
+        if _FIFO_JSON_PATH.exists():
+            with open(_FIFO_JSON_PATH) as _fj:
+                _fifo_depths = json.load(_fj)
+            print(f'[fifo] Loaded {len(_fifo_depths)} optimised FIFO depths ← {_FIFO_JSON_PATH}')
+        else:
+            print(
+                f'[fifo] WARNING: full model ran with --fifo but {_FIFO_JSON_PATH} not found'
+                ' — sub-models will not inherit depths.'
+            )
+
     if _key == 'full' and _ARGS.diag:
         _diag_hls_bisect(full_model, X_full, str(_BASE / 'diag'))
 

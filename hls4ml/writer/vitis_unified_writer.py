@@ -364,13 +364,13 @@ fi
                             out_stream = out_func + '_ap'
                             newline = indent + f'hls::stream<{self._get_dma_float_type_name()}> {inp_stream};\n'
                             newline += (
-                                indent + f'nnet::convert_data_axis<{dtype},{dtype}, N_IN>({inp_func}, {inp_stream});\n'
+                                indent + f'nnet::convert_data_axis<{dtype},{dtype}, N_IN_0>({inp_func}, {inp_stream});\n'
                             )
                             newline += indent + f'hls::stream<{self._get_dma_float_type_name()}> {out_stream};\n'
                             newline += indent + self._get_top_wrap_func_name(model, False) + '('
                             newline += inp_stream + ', ' + out_stream + ', 1);\n'
                             newline += (
-                                indent + f'nnet::convert_data_axis<{dtype},{dtype}, N_OUT>({out_stream}, {out_func});\n'
+                                indent + f'nnet::convert_data_axis<{dtype},{dtype}, N_OUT_0>({out_stream}, {out_func});\n'
                             )
                 elif '// hls-fpga-machine-learning insert trace_outputs' in line:
                     newline = ''
@@ -799,7 +799,7 @@ fi
                         assert len(model_inputs) == 1, 'Only support one input for axi stream'
                         assert len(model_outputs) == 1, 'Only support one output for axi stream'
                         newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> inputs;\n'
-                        newline += 3 * indent + 'nnet::convert_data_axis<float,float, N_IN>(in, inputs);\n'
+                        newline += 3 * indent + 'nnet::convert_data_axis<float,float, N_IN_0>(in, inputs);\n'
                         newline += 3 * indent + 'std::cout << "input size inputs: " << inputs.size() << std::endl;\n'
                         newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> outputs;\n\n'
                 elif '// hls-fpga-machine-learning insert top-level-function' in line:
@@ -842,7 +842,7 @@ fi
                     else:
                         newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> inputs;\n'
                         newline += (
-                            3 * indent + f'nnet::fill_zero_axi<{self._get_dma_float_type_name()}, N_IN>(inputs, false);\n'
+                            3 * indent + f'nnet::fill_zero_axi<{self._get_dma_float_type_name()}, N_IN_0>(inputs, false);\n'
                         )
                         newline += 3 * indent + 'std::cout << "input size inputs: " << inputs.size() << std::endl;\n'
                         newline += 3 * indent + f'hls::stream<{self._get_dma_float_type_name()}> outputs;\n\n'
@@ -864,7 +864,7 @@ fi
                         else:
                             newline += (
                                 indent + f'nnet::print_result_axis<{self._get_dma_float_type_name()}'
-                                f', N_OUT>(outputs, fout, false);\n'
+                                f', N_OUT_0>(outputs, fout, false);\n'
                             )
                 elif ('// hls-fpga-machine-learning insert output' in line) or (
                     '// hls-fpga-machine-learning insert quantized' in line
@@ -886,7 +886,7 @@ fi
                                 )
                         else:
                             newline += indent + (
-                                f'nnet::print_result_axis<{self._get_dma_float_type_name()}, N_OUT>('
+                                f'nnet::print_result_axis<{self._get_dma_float_type_name()}, N_OUT_0>('
                                 f'outputs, std::cout, {keep_output});\n'
                             )
                 elif '// hls-fpga-machine-learning insert namespace' in line:
