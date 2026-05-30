@@ -55,6 +55,21 @@ _parser.add_argument(
     default=False,
     help='Enable FIFO depth optimization flow (vitisunified:fifo_depth_optimization) (default: disabled)',
 )
+_parser.add_argument(
+    '--banks',
+    type=int,
+    default=None,
+    help='Override MAGIC_STREAMER_BANKS (total FPGA bank budget N for the magic streamer).',
+)
+_parser.add_argument(
+    '--magic-only',
+    action='store_true',
+    default=False,
+    help=(
+        'Only run the magic streamer buffer calculation, then exit. '
+        'Does NOT touch existing generated projects under hls4ml_output2/.'
+    ),
+)
 _ARGS = _parser.parse_args()
 _RUN = {
     'all': {'full', 'part1', 'part2', 'part3', 'part4'},
@@ -64,10 +79,23 @@ _RUN = {
 # ── USER CONFIG ───────────────────────────────────────────────────────────────
 NUM_QUERIES = 20_000
 MAX_QUERIES = 1_000_000
-HLS_REUSE_FACTOR = 8
+HLS_REUSE_FACTOR = 8  # default (part2 + full model)
+HLS_REUSE_FACTOR_BY_KEY = {
+    'full': 8,
+    'part1': 4,
+    'part2': 8,
+    'part3': 4,
+    'part4': 4,
+}
 HLS_PRECISION = 'ap_fixed<16,6>'
 HLS_OUT_PRECISION = 'ap_fixed<16,2>'
 HLS_GAP_PRECISION = 'ap_fixed<32,16>'
+
+# Magic streamer (inter-partition buffer) sizing
+MAGIC_STREAMER_BANKS = 64  # total bank budget N (override with --banks)
+MAGIC_STREAMER_BANK_WIDTH = 64  # bits per bank I/O
+MAGIC_STREAMER_BANK_DEPTH = 4096  # rows per bank
+_MAGIC_BANKS = _ARGS.banks if _ARGS.banks is not None else MAGIC_STREAMER_BANKS
 
 # ── PATHS ─────────────────────────────────────────────────────────────────────
 _BASE = Path(__file__).parent / 'hls4ml_output2'
@@ -96,11 +124,12 @@ _FIFO_JSON_PATH = Path(_DIRS['full']) / 'fifo_depths.json'
 # ── SETUP ─────────────────────────────────────────────────────────────────────
 assert NUM_QUERIES <= MAX_QUERIES, f'NUM_QUERIES ({NUM_QUERIES}) > MAX_QUERIES ({MAX_QUERIES})'
 _LOCK.mkdir(parents=True, exist_ok=True)
-for _k in _RUN:
-    _d = _DIRS[_k]
-    if os.path.exists(_d):
-        shutil.rmtree(_d)
-    os.makedirs(_d)
+if not _ARGS.magic_only:
+    for _k in _RUN:
+        _d = _DIRS[_k]
+        if os.path.exists(_d):
+            shutil.rmtree(_d)
+        os.makedirs(_d)
 
 # Guard: --fifo without the full model in this run requires a prior fifo_depths.json
 if _ARGS.fifo and 'full' not in _RUN:
@@ -129,6 +158,8 @@ def _open_tlog(key: str) -> None:
 
 
 def _tlog_write(key: str, line: str) -> None:
+    if key not in _tlogs:
+        return
     f, _ = _tlogs[key]
     f.write(line + '\n')
     os.fsync(f.fileno())
@@ -136,6 +167,10 @@ def _tlog_write(key: str, line: str) -> None:
 
 @contextmanager
 def timed_step(key: str, name: str):
+    if key not in _tlogs:
+        # magic-only mode: no timing log file, no FS side-effects
+        yield
+        return
     _tlog_write(key, f'[START] {name}  ({time.strftime("%H:%M:%S")})')
     t0 = time.perf_counter()
     try:
@@ -146,16 +181,17 @@ def timed_step(key: str, name: str):
         print(f'  [{key}][timing] {name}: {elapsed:.3f}s')
 
 
-for _key in _DIRS:
-    _open_tlog(_key)
+if not _ARGS.magic_only:
+    for _key in _DIRS:
+        _open_tlog(_key)
 
 
 # ── HLS CONFIG HELPER (shared by run_model + diag) ────────────────────────────
-def _make_hls_cfg(model) -> dict:
+def _make_hls_cfg(model, reuse_factor: int = HLS_REUSE_FACTOR) -> dict:
     """Build hls4ml config with per-layer precision rules."""
     cfg = hls4ml.utils.config_from_keras_model(model, granularity='name')
     cfg['Model']['Strategy'] = 'resource'
-    cfg['Model']['ReuseFactor'] = HLS_REUSE_FACTOR
+    cfg['Model']['ReuseFactor'] = reuse_factor
     cfg['Model']['Precision'] = HLS_PRECISION
     for ln in cfg.get('LayerName', {}):
         cfg['LayerName'][ln]['Precision'] = (
@@ -258,9 +294,10 @@ with timed_step('full', '1. Keras model definition'):
 
     full_model = Model(inp, full_out, name='full_model')
     full_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    msg = _init_weights(full_model)
-    print(f'[lock] {msg}')
-    _tlog_write('full', msg)
+    if not _ARGS.magic_only:
+        msg = _init_weights(full_model)
+        print(f'[lock] {msg}')
+        _tlog_write('full', msg)
     full_model.summary()
 
 # Part 1 sub-model: single input, two outputs (main + skip1 for part4)
@@ -288,6 +325,287 @@ part4_model = Model([_p4m, _p4s1], _y, name='part4')
 part4_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
 print('All 5 Keras models built — weights shared via same layer objects.')
+
+
+# ── MAGIC STREAMER BUFFER CALCULATION ────────────────────────────────────────
+def _magic_streamer_report(streams, total_banks, amt_phase, debug=False):
+    """Compute and print bank/group allocation for the inter-partition magic streamer.
+
+    Args:
+        streams: ordered list of dicts with keys
+            name, shape (tuple, no batch), region (0|1),
+            alloc_phase (int idx into _PHASES), free_phase (int idx into _PHASES).
+        num_queries: desired buffered query count Q_target.
+        total_banks: bank budget N.
+
+    Returns:
+        dict with the full computation (geometry, reuse, phases, allocation, achievable Q).
+    """
+
+    BW = MAGIC_STREAMER_BANK_WIDTH
+    BD = MAGIC_STREAMER_BANK_DEPTH
+
+    # --- init ------------------
+    for stream in streams:
+        shape = tuple(int(d) for d in stream['shape'])
+
+        amt_entry_per_query = 1
+        for d in shape[:-1]:
+            amt_entry_per_query *= d
+        amt_var_per_entry = shape[-1]
+        precision = stream['precision']
+
+        bits_per_entry = precision * amt_var_per_entry
+        amt_banks_per_entry = (bits_per_entry + BW - 1) // BW
+        amt_query_per_bankGrp = BD // amt_entry_per_query
+
+        stream['shape'] = shape
+        stream['amt_entry_per_query'] = amt_entry_per_query
+        stream['bits_per_entry'] = bits_per_entry
+        stream['amt_banks_per_entry'] = amt_banks_per_entry
+        stream['amt_query_per_bankGrp'] = amt_query_per_bankGrp
+
+        # bug-3 check: a stream whose single query already exceeds one bank depth
+        # cannot be buffered by the current single-bank-group scheme.
+        if amt_query_per_bankGrp == 0:
+            raise ValueError(
+                f"[magic-streamer] stream '{stream['name']}' has amt_entry_per_query="
+                f'{amt_entry_per_query} > BANK_DEPTH={BD}; one query does not fit in a '
+                f'single bank group. Increase MAGIC_STREAMER_BANK_DEPTH or split the stream.'
+            )
+
+    # --- show stream clarification --------------
+    stream_border = '  ' + '─' * 148
+    print('[magic-streamer] streams:')
+    print(stream_border)
+    print(
+        f'  | {"name":<10} | {"shape":<18} | {"region":>6} | {"alloc_phase":>11} | {"free_phase":>10} '
+        f'| {"precision":>9} | {"amt_entry_per_query":>19} | {"bits_per_entry":>14} '
+        f'| {"amt_banks_per_entry":>19} | {"amt_query_per_bankGrp":>21} |'
+    )
+    print(stream_border)
+    for s in streams:
+        print(
+            f'  | {s["name"]:<10} | {str(s["shape"]):<18} | {s["region"]:>6} '
+            f'| {s["alloc_phase"]:>11} | {s["free_phase"]:>10} | {s["precision"]:>9} '
+            f'| {s["amt_entry_per_query"]:>19} | {s["bits_per_entry"]:>14} '
+            f'| {s["amt_banks_per_entry"]:>19} | {s["amt_query_per_bankGrp"]:>21} |'
+        )
+    print(stream_border)
+
+    # --- init
+
+    # magic streamer holder
+    #  name
+    #  amt_banks_per_entry
+    #  next_fin_phase
+    #  stream: []
+    #  mul_factor:
+    #  store from region
+
+    last_dfx_streamer_id = 1
+    dfx_streamers = []
+    free_dfx_streamers = []
+    using_dfx_streamers = []
+
+    # allocate the streamer
+    for alloc_phase in range(0, amt_phase):
+        if debug:
+            print(f'\n[magic-streamer] ───── phase {alloc_phase} ─────')
+
+        phase_streams = [s for s in streams if s['alloc_phase'] == alloc_phase]
+        if debug:
+            print(f'  streams to allocate ({len(phase_streams)}): {[s["name"] for s in phase_streams]}')
+            print(f'  free  pool before: {[d["name"] for d in free_dfx_streamers]}')
+            print(f'  using pool before: {[d["name"] for d in using_dfx_streamers]}')
+
+        # allocate stream to dfx streamer
+        for stream in phase_streams:
+            found = False
+            for free_dfx_streamer in free_dfx_streamers:
+                if (stream['amt_banks_per_entry'] == free_dfx_streamer['amt_banks_per_entry']) and (
+                    stream['region'] == free_dfx_streamer['region']
+                ):
+                    free_dfx_streamer['next_fin_phase'] = stream['free_phase']
+                    free_dfx_streamer['streams'].append(stream)
+                    free_dfx_streamers.remove(free_dfx_streamer)
+                    using_dfx_streamers.append(free_dfx_streamer)
+                    found = True
+                    if debug:
+                        print(
+                            f'    [reuse]  stream {stream["name"]:<10} → {free_dfx_streamer["name"]} '
+                            f'(banks/e={stream["amt_banks_per_entry"]}, region={stream["region"]}, '
+                            f'next_fin_phase={stream["free_phase"]})'
+                        )
+                    break
+            # if there is no magic streamer, create new one
+            if not found:
+                new_dfx_streamer = {
+                    'name': f'streamer_{last_dfx_streamer_id}',
+                    'amt_banks_per_entry': stream['amt_banks_per_entry'],
+                    'region': stream['region'],
+                    'next_fin_phase': stream['free_phase'],
+                    'mul_factor': 1,
+                    'streams': [stream],
+                }
+                last_dfx_streamer_id += 1
+                dfx_streamers.append(new_dfx_streamer)
+                using_dfx_streamers.append(new_dfx_streamer)
+                if debug:
+                    print(
+                        f'    [create] stream {stream["name"]:<10} → {new_dfx_streamer["name"]} '
+                        f'(banks/e={stream["amt_banks_per_entry"]}, region={stream["region"]}, '
+                        f'next_fin_phase={stream["free_phase"]})'
+                    )
+
+        # try to free the using_dfx_streamer whose next_fin_phase matches current alloc_phase
+        for using_dfx_streamer in list(using_dfx_streamers):
+            if using_dfx_streamer['next_fin_phase'] == alloc_phase:
+                using_dfx_streamers.remove(using_dfx_streamer)
+                free_dfx_streamers.append(using_dfx_streamer)
+                if debug:
+                    print(f'    [free]   {using_dfx_streamer["name"]} (next_fin_phase=={alloc_phase})')
+
+        if debug:
+            print(f'  free  pool after : {[d["name"] for d in free_dfx_streamers]}')
+            print(f'  using pool after : {[d["name"] for d in using_dfx_streamers]}')
+
+    # bug-2 guard: nothing to upgrade if no dfx_streamers were created
+    if not dfx_streamers:
+        print('[magic-streamer] no dfx_streamers allocated — skipping upgrade loop.')
+        return {'dfx_streamers': dfx_streamers, 'total_banks_used': 0}
+
+    if debug:
+        print(f'\n[magic-streamer] ───── upgrade loop (budget={total_banks} banks) ─────')
+    upgrade_iter = 0
+    while True:
+        upgrade_iter += 1
+        total_banks_used = sum(d['amt_banks_per_entry'] * d['mul_factor'] for d in dfx_streamers)
+
+        if debug:
+            print(f'\n  ── iter {upgrade_iter} ──  total_banks_used={total_banks_used}/{total_banks}')
+            for d in dfx_streamers:
+                cap = d['mul_factor'] * min(s['amt_query_per_bankGrp'] for s in d['streams'])
+                print(
+                    f'    {d["name"]:<14} mul_factor={d["mul_factor"]:>3} '
+                    f'banks={d["amt_banks_per_entry"] * d["mul_factor"]:>4} capacity(Q)={cap}'
+                )
+
+        # find the smallest d["mul_factor"] * stream["amt_query_per_bankGrp"]
+        upgradable_streamer = min(
+            dfx_streamers,
+            key=lambda streamer: (
+                streamer['mul_factor'] * min(stream['amt_query_per_bankGrp'] for stream in streamer['streams'])
+            ),
+        )
+        banks_delta = upgradable_streamer['amt_banks_per_entry']
+        if debug:
+            print(f'    -> bottleneck: {upgradable_streamer["name"]} (+{banks_delta} banks if upgraded)')
+
+        # try growing the bottleneck by one bank-group; stop if it would exceed the budget
+        if (total_banks_used + banks_delta) > total_banks:
+            if debug:
+                print(f'    [stop] upgrade would exceed budget ({total_banks_used}+{banks_delta} > {total_banks})')
+            break
+        upgradable_streamer['mul_factor'] += 1
+        if debug:
+            print(f'    [upgrade] {upgradable_streamer["name"]}.mul_factor -> {upgradable_streamer["mul_factor"]}')
+
+    # --- show dfx streamr clarification --------------
+    outer_border = '  ' + '─' * 92
+    inner_border = '      ' + '·' * 86
+    print('[magic-streamer] dfx_streamers:')
+    print(outer_border)
+    print(f'  | {"name":<14} | {"region":>6} | {"amt_banks_per_entry":>19} | {"next_fin_phase":>14} | {"mul_factor":>10} |')
+    print(outer_border)
+    print(f'      | {"stream":<12} | {"amt_entry_per_query":>19} | {"amt_query_per_bankGrp":>21} | {"total_query":>11} |')
+    print(inner_border)
+    for d in dfx_streamers:
+        print(
+            f'  | {d["name"]:<14} | {d["region"]:>6} | {d["amt_banks_per_entry"]:>19} '
+            f'| {d["next_fin_phase"]:>14} | {d["mul_factor"]:>10} |'
+        )
+        print(inner_border)
+        for s in d['streams']:
+            total_query = d['mul_factor'] * s['amt_query_per_bankGrp']
+            print(
+                f'      | {s["name"]:<12} | {s["amt_entry_per_query"]:>19} '
+                f'| {s["amt_query_per_bankGrp"]:>21} | {total_query:>11} |'
+            )
+        print(inner_border)
+    print(outer_border)
+
+    min_total_query = min(d['mul_factor'] * s['amt_query_per_bankGrp'] for d in dfx_streamers for s in d['streams'])
+    print(f'[magic-streamer] lowest total_query across all streams = {min_total_query}')
+
+    return {
+        'dfx_streamers': dfx_streamers,
+        'total_banks_used': total_banks_used,
+        'min_total_query': min_total_query,
+    }
+
+
+# Build the stream list from the live Keras sub-models so it stays in sync if the
+# topology changes. Region / phase tags are intrinsic to the partition scheme.
+def _shape_of(t):
+    return tuple(d for d in t.shape[1:])  # drop batch
+
+
+_MODEL_OUTPUT_STREAMS = [
+    # name, source tensor, region (producer partition), alloc phase, free phase (= consumer load phase)
+    # phase 0 -> region 0
+    # phase 1 -> region 1
+    # phase 2 -> region 0
+    # phase 3 -> region 1
+    #
+    {
+        'name': 'p0_main',
+        'shape': _shape_of(part1_model.outputs[0]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 0,
+        'free_phase': 1,
+    },  # part1_store .. part2_load (free after phase 1)
+    {
+        'name': 'p0_skip',
+        'shape': _shape_of(part1_model.outputs[1]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 0,
+        'free_phase': 3,
+    },  # part1_store .. part4_load
+    {
+        'name': 'p1_main',
+        'shape': _shape_of(part2_model.outputs[0]),
+        'precision': 16,
+        'region': 1,
+        'alloc_phase': 1,
+        'free_phase': 2,
+    },  # part2_store .. part3_load
+    {
+        'name': 'p1_skip',
+        'shape': _shape_of(part2_model.outputs[1]),
+        'precision': 16,
+        'region': 1,
+        'alloc_phase': 1,
+        'free_phase': 2,
+    },
+    {
+        'name': 'p2_main',
+        'shape': _shape_of(part3_model.outputs[0]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 2,
+        'free_phase': 3,
+    },  # part3_store .. part4_load
+]
+
+_magic_streamer_report(_MODEL_OUTPUT_STREAMS, _MAGIC_BANKS, 3)
+
+if _ARGS.magic_only:
+    print('[magic-only] Report complete — exiting without touching generated projects.')
+    raise SystemExit(0)
+
 
 # ── INPUT DATA ────────────────────────────────────────────────────────────────
 X_pool = _load_input_pool()
@@ -427,7 +745,17 @@ def _apply_fifo_depths_from_full(key: str, hls_model, fifo_depths: dict) -> None
 
 
 # ── RUN ONE PARTITION ─────────────────────────────────────────────────────────
-def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo=False, fifo_depths=None):
+def run_model(
+    key,
+    keras_model,
+    X_input,
+    input_flat,
+    output_flat,
+    full_run,
+    fifo=False,
+    fifo_depths=None,
+    reuse_factor: int = HLS_REUSE_FACTOR,
+):
     """Convert → plot → (apply FIFO depths) → compile → (predict + save if full_run).
 
     Args:
@@ -450,7 +778,7 @@ def run_model(key, keras_model, X_input, input_flat, output_flat, full_run, fifo
     )
 
     with timed_step(key, '2. hls4ml config'):
-        cfg = _make_hls_cfg(keras_model)
+        cfg = _make_hls_cfg(keras_model, reuse_factor=reuse_factor)
         if full_run and fifo:
             cfg['Flows'] = ['vitisunified:fifo_depth_optimization']
 
@@ -555,6 +883,7 @@ for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
         _cfg['full_run'],
         fifo=_ARGS.fifo,
         fifo_depths=_fifo_depths,
+        reuse_factor=HLS_REUSE_FACTOR_BY_KEY.get(_key, HLS_REUSE_FACTOR),
     )
 
     # After the full model completes, load its fifo_depths.json so sub-models
