@@ -1,10 +1,10 @@
 """
 Skip-connection Conv NN — 4-part partition experiment (U-Net style).
 
-  PART 1  inp → enc_conv1(skip1) → enc_conv2 → enc_pool1
+  PART 1  inp → enc_conv1(skip1) → enc_conv1b → enc_conv2 → enc_pool1
   PART 2  enc_pool1 → enc_conv3(skip2) → enc_pool2 → bottleneck
-  PART 3  [bottleneck, skip2] → dec_up1 → dec_conv1 → skip2_add
-  PART 4  [skip2_add, skip1] → dec_up2 → dec_conv2 → skip1_add → gap → dense1 → dense_out
+  PART 3  [bottleneck, skip2] → dec_up1 → dec_conv1 → skip2_add → dec_conv1b
+  PART 4  [skip2_add+, skip1] → dec_up2 → dec_conv2a → dec_conv2 → skip1_add → gap → dense1 → dense_out
 
   part1 : in (8,8,1)              out [(4,4,16), (8,8,8)]
   part2 : in (4,4,16)             out [(2,2,16), (4,4,16)]
@@ -82,10 +82,10 @@ MAX_QUERIES = 1_000_000
 HLS_REUSE_FACTOR = 8  # default (part2 + full model)
 HLS_REUSE_FACTOR_BY_KEY = {
     'full': 8,
-    'part1': 4,
+    'part1': 8,
     'part2': 8,
-    'part3': 4,
-    'part4': 4,
+    'part3': 8,
+    'part4': 8,
 }
 HLS_PRECISION = 'ap_fixed<16,6>'
 HLS_OUT_PRECISION = 'ap_fixed<16,2>'
@@ -216,8 +216,8 @@ _HLS_PARAMS = dict(
 def _init_weights(model) -> str:
     """Load weights from lock file, or train + save if missing."""
     if _WEIGHTS_FILE.exists():
-        model.load_weights(str(_WEIGHTS_FILE))
-        return f'Weights loaded ← {_WEIGHTS_FILE}'
+        model.load_weights(str(_WEIGHTS_FILE), by_name=True, skip_mismatch=True)
+        return f'Weights loaded (by_name) ← {_WEIGHTS_FILE}'
     np.random.seed(0)
     X_tr = np.random.rand(500, 8, 8, 1).astype(np.float32)
     y_tr = np.eye(4)[np.random.randint(0, 4, 500)]
@@ -271,7 +271,8 @@ with timed_step('full', '1. Keras model definition'):
 
     # Part 1 — Encoder-A
     s1 = Conv2D(8, (3, 3), padding='same', activation='relu', name='enc_conv1')(inp)  # (8,8,8)  → skip1
-    x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv2')(s1)  # (8,8,16)
+    x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv1b')(s1)  # (8,8,16)
+    x = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv2')(x)  # (8,8,16)
     p1_out = MaxPooling2D((2, 2), name='enc_pool1')(x)  # (4,4,16)
 
     # Part 2 — Encoder-B + Bottleneck
@@ -282,14 +283,16 @@ with timed_step('full', '1. Keras model definition'):
     # Part 3 — Decoder-A
     y = UpSampling2D((2, 2), name='dec_up1')(p2_out)  # (4,4,16)
     y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv1')(y)  # (4,4,16)
-    p3_out = Add(name='skip2_add')([y, s2])  # (4,4,16) ← skip2
+    y = Add(name='skip2_add')([y, s2])  # (4,4,16) ← skip2
+    p3_out = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv1b')(y)  # (4,4,16)
 
     # Part 4 — Decoder-B + Head
     y = UpSampling2D((2, 2), name='dec_up2')(p3_out)  # (8,8,16)
+    y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv2a')(y)  # (8,8,16)
     y = Conv2D(8, (3, 3), padding='same', activation='relu', name='dec_conv2')(y)  # (8,8,8)
-    y = Add(name='skip1_add')([y, s1])  # (8,8,8)  ← skip1
+    y = Add(name='skip1_add')([y, s1])  # (8,8,8) ← skip1
     y = GlobalAveragePooling2D(name='gap')(y)
-    y = Dense(16, activation='relu', name='dense1')(y)
+    y = Dense(64, activation='relu', name='dense1')(y)
     full_out = Dense(4, activation=None, name='dense_out')(y)
 
     full_model = Model(inp, full_out, name='full_model')
@@ -314,12 +317,15 @@ part2_model.compile(optimizer='adam', loss='mse')
 # Part 3 sub-model: two inputs (bottleneck + skip2)
 _p3m, _p3s2 = Input(shape=(2, 2, 16), name='p3_main_inp'), Input(shape=(4, 4, 16), name='p3_skip2_inp')
 _y = full_model.get_layer('skip2_add')([full_model.get_layer('dec_conv1')(full_model.get_layer('dec_up1')(_p3m)), _p3s2])
+_y = full_model.get_layer('dec_conv1b')(_y)
 part3_model = Model([_p3m, _p3s2], _y, name='part3')
 part3_model.compile(optimizer='adam', loss='mse')
 
 # Part 4 sub-model: two inputs (p3_out + skip1)
 _p4m, _p4s1 = Input(shape=(4, 4, 16), name='p4_main_inp'), Input(shape=(8, 8, 8), name='p4_skip1_inp')
-_y = full_model.get_layer('skip1_add')([full_model.get_layer('dec_conv2')(full_model.get_layer('dec_up2')(_p4m)), _p4s1])
+_y = full_model.get_layer('skip1_add')(
+    [full_model.get_layer('dec_conv2')(full_model.get_layer('dec_conv2a')(full_model.get_layer('dec_up2')(_p4m))), _p4s1]
+)
 _y = full_model.get_layer('dense_out')(full_model.get_layer('dense1')(full_model.get_layer('gap')(_y)))
 part4_model = Model([_p4m, _p4s1], _y, name='part4')
 part4_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
@@ -636,6 +642,7 @@ _PART_CFG = {
 # ── DIAGNOSTIC: layer-by-layer HLS bisect ────────────────────────────────────
 _PROBE_LAYERS = [
     'enc_conv1',
+    'enc_conv1b',
     'enc_conv2',
     'enc_pool1',
     'enc_conv3',
@@ -644,7 +651,9 @@ _PROBE_LAYERS = [
     'dec_up1',
     'dec_conv1',
     'skip2_add',
+    'dec_conv1b',
     'dec_up2',
+    'dec_conv2a',
     'dec_conv2',
     'skip1_add',
     'gap',
