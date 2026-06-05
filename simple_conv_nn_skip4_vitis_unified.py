@@ -4,11 +4,11 @@ Skip-connection Conv NN — 4-part partition experiment (U-Net style).
   PART 1  inp → enc_conv1(skip1) → enc_conv1b → enc_conv2 → enc_pool1
   PART 2  enc_pool1 → enc_conv3(skip2) → enc_pool2 → bottleneck
   PART 3  [bottleneck, skip2] → dec_up1 → dec_conv1 → skip2_add → dec_conv1b
-  PART 4  [skip2_add+, skip1] → dec_up2 → dec_conv2a → dec_conv2 → skip1_add → gap → dense1 → dense_out
+  PART 4  [skip2_add+, skip1] → dec_up2 → dec_conv2 → skip1_add → gap → dense1 → dense_out
 
   part1 : in (8,8,1)              out [(4,4,16), (8,8,8)]
-  part2 : in (4,4,16)             out [(2,2,16), (4,4,16)]
-  part3 : in [(2,2,16), (4,4,16)] out (4,4,16)
+  part2 : in (4,4,16)             out [(2,2,8), (4,4,16)]
+  part3 : in [(2,2,8), (4,4,16)]  out (4,4,16)
   part4 : in [(4,4,16), (8,8,8)]  out (4,)
 
 Lock dir: hls4ml_output/_exp_locked_skip4/
@@ -278,17 +278,16 @@ with timed_step('full', '1. Keras model definition'):
     # Part 2 — Encoder-B + Bottleneck
     s2 = Conv2D(16, (3, 3), padding='same', activation='relu', name='enc_conv3')(p1_out)  # (4,4,16) → skip2
     x = MaxPooling2D((2, 2), name='enc_pool2')(s2)  # (2,2,16)
-    p2_out = Conv2D(16, (3, 3), padding='same', activation='relu', name='bottleneck')(x)  # (2,2,16)
+    p2_out = Conv2D(8, (3, 3), padding='same', activation='relu', name='bottleneck')(x)  # (2,2,8)
 
     # Part 3 — Decoder-A
-    y = UpSampling2D((2, 2), name='dec_up1')(p2_out)  # (4,4,16)
+    y = UpSampling2D((2, 2), name='dec_up1')(p2_out)  # (4,4,8)
     y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv1')(y)  # (4,4,16)
     y = Add(name='skip2_add')([y, s2])  # (4,4,16) ← skip2
     p3_out = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv1b')(y)  # (4,4,16)
 
     # Part 4 — Decoder-B + Head
     y = UpSampling2D((2, 2), name='dec_up2')(p3_out)  # (8,8,16)
-    y = Conv2D(16, (3, 3), padding='same', activation='relu', name='dec_conv2a')(y)  # (8,8,16)
     y = Conv2D(8, (3, 3), padding='same', activation='relu', name='dec_conv2')(y)  # (8,8,8)
     y = Add(name='skip1_add')([y, s1])  # (8,8,8) ← skip1
     y = GlobalAveragePooling2D(name='gap')(y)
@@ -315,7 +314,7 @@ part2_model = Model(_p2i, [_bn, _s2], name='part2')
 part2_model.compile(optimizer='adam', loss='mse')
 
 # Part 3 sub-model: two inputs (bottleneck + skip2)
-_p3m, _p3s2 = Input(shape=(2, 2, 16), name='p3_main_inp'), Input(shape=(4, 4, 16), name='p3_skip2_inp')
+_p3m, _p3s2 = Input(shape=(2, 2, 8), name='p3_main_inp'), Input(shape=(4, 4, 16), name='p3_skip2_inp')
 _y = full_model.get_layer('skip2_add')([full_model.get_layer('dec_conv1')(full_model.get_layer('dec_up1')(_p3m)), _p3s2])
 _y = full_model.get_layer('dec_conv1b')(_y)
 part3_model = Model([_p3m, _p3s2], _y, name='part3')
@@ -323,9 +322,7 @@ part3_model.compile(optimizer='adam', loss='mse')
 
 # Part 4 sub-model: two inputs (p3_out + skip1)
 _p4m, _p4s1 = Input(shape=(4, 4, 16), name='p4_main_inp'), Input(shape=(8, 8, 8), name='p4_skip1_inp')
-_y = full_model.get_layer('skip1_add')(
-    [full_model.get_layer('dec_conv2')(full_model.get_layer('dec_conv2a')(full_model.get_layer('dec_up2')(_p4m))), _p4s1]
-)
+_y = full_model.get_layer('skip1_add')([full_model.get_layer('dec_conv2')(full_model.get_layer('dec_up2')(_p4m)), _p4s1])
 _y = full_model.get_layer('dense_out')(full_model.get_layer('dense1')(full_model.get_layer('gap')(_y)))
 part4_model = Model([_p4m, _p4s1], _y, name='part4')
 part4_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
@@ -653,7 +650,6 @@ _PROBE_LAYERS = [
     'skip2_add',
     'dec_conv1b',
     'dec_up2',
-    'dec_conv2a',
     'dec_conv2',
     'skip1_add',
     'gap',
