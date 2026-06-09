@@ -1,15 +1,25 @@
 """
-Skip-connection Conv NN — 4-part partition experiment (U-Net style).
+Skip-connection Conv NN — partition experiment (U-Net style).
 
-  PART 1  inp → enc_conv1(skip1) → enc_conv1b → enc_conv2 → enc_pool1
-  PART 2  enc_pool1 → enc_conv3(skip2) → enc_pool2 → bottleneck
-  PART 3  [bottleneck, skip2] → dec_up1 → dec_conv1 → skip2_add → dec_conv1b
-  PART 4  [skip2_add+, skip1] → dec_up2 → dec_conv2 → skip1_add → gap → dense1 → dense_out
+Selectable partition scheme via --split (both schemes share the same locked weights):
 
-  part1 : in (8,8,1)              out [(4,4,16), (8,8,8)]
-  part2 : in (4,4,16)             out [(2,2,8), (4,4,16)]
-  part3 : in [(2,2,8), (4,4,16)]  out (4,4,16)
-  part4 : in [(4,4,16), (8,8,8)]  out (4,)
+  --split 4 (default)  four partitions part1–part4:
+    PART 1  inp → enc_conv1(skip1) → enc_conv1b → enc_conv2 → enc_pool1
+    PART 2  enc_pool1 → enc_conv3(skip2) → enc_pool2 → bottleneck
+    PART 3  [bottleneck, skip2] → dec_up1 → dec_conv1 → skip2_add → dec_conv1b
+    PART 4  [skip2_add+, skip1] → dec_up2 → dec_conv2 → skip1_add → gap → dense1 → dense_out
+
+    part1 : in (8,8,1)              out [(4,4,16), (8,8,8)]
+    part2 : in (4,4,16)             out [(2,2,8), (4,4,16)]
+    part3 : in [(2,2,8), (4,4,16)]  out (4,4,16)
+    part4 : in [(4,4,16), (8,8,8)]  out (4,)
+
+  --split 2  two halves at the bottleneck (halfA = part1∪part2, halfB = part3∪part4):
+    HALF A  inp → enc_conv1(skip1) → … → bottleneck     out [bottleneck, skip2, skip1]
+    HALF B  [bottleneck, skip2, skip1] → dec_up1 → … → dense_out
+
+    halfA : in (8,8,1)                       out [(2,2,8), (4,4,16), (8,8,8)]
+    halfB : in [(2,2,8), (4,4,16), (8,8,8)]  out (4,)
 
 Lock dir: hls4ml_output/_exp_locked_skip4/
 """
@@ -31,16 +41,28 @@ from tensorflow.keras.models import Model
 import hls4ml
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
-_parser = argparse.ArgumentParser(description='Skip-connection Conv NN hls4ml experiment (4-part)')
+_parser = argparse.ArgumentParser(description='Skip-connection Conv NN hls4ml experiment (2-/4-part)')
+_parser.add_argument(
+    '--split',
+    type=int,
+    choices=[2, 4],
+    default=4,
+    help=(
+        'Partition scheme:\n'
+        '4 — original part1–part4 (default)\n'
+        '2 — two halves: halfA (encoder→bottleneck) + halfB (decoder→head)'
+    ),
+)
 _parser.add_argument(
     '--mode',
-    choices=['all', 'full', 'parts', 'part1', 'part2', 'part3', 'part4'],
+    choices=['all', 'full', 'parts', 'part1', 'part2', 'part3', 'part4', 'halfA', 'halfB'],
     default='all',
     help=(
-        'all   — full model + all 4 partitions + diag  (default)\n'
+        'all   — full model + every partition of the chosen --split + diag  (default)\n'
         'full  — full model only\n'
-        'parts — part1–part4 only (no full model, no diag)\n'
-        'part1…part4 — single partition'
+        'parts — partitions only (no full model, no diag)\n'
+        'part1…part4 — single partition  (--split 4)\n'
+        'halfA/halfB — single half       (--split 2)'
     ),
 )
 _parser.add_argument(
@@ -71,10 +93,18 @@ _parser.add_argument(
     ),
 )
 _ARGS = _parser.parse_args()
+_SPLIT = _ARGS.split
+# Partition keys for the chosen split scheme.
+_PART_KEYS = ['part1', 'part2', 'part3', 'part4'] if _SPLIT == 4 else ['halfA', 'halfB']
+
 _RUN = {
-    'all': {'full', 'part1', 'part2', 'part3', 'part4'},
-    'parts': {'part1', 'part2', 'part3', 'part4'},
+    'all': {'full', *_PART_KEYS},
+    'parts': {*_PART_KEYS},
 }.get(_ARGS.mode, {_ARGS.mode})
+
+# Guard: a single-partition --mode must belong to the active --split scheme.
+if _ARGS.mode not in ('all', 'parts', 'full') and _ARGS.mode not in _PART_KEYS:
+    _parser.error(f'--mode {_ARGS.mode} is not valid with --split {_SPLIT}; partition keys are {_PART_KEYS}')
 
 # ── USER CONFIG ───────────────────────────────────────────────────────────────
 NUM_QUERIES = 20_000
@@ -86,6 +116,8 @@ HLS_REUSE_FACTOR_BY_KEY = {
     'part2': 8,
     'part3': 8,
     'part4': 8,
+    'halfA': 8,
+    'halfB': 8,
 }
 HLS_PRECISION = 'ap_fixed<16,6>'
 HLS_OUT_PRECISION = 'ap_fixed<16,2>'
@@ -109,6 +141,8 @@ _DIRS = {
     'part2': str(_BASE / 'hls4mlprj_skip4_part2'),
     'part3': str(_BASE / 'hls4mlprj_skip4_part3'),
     'part4': str(_BASE / 'hls4mlprj_skip4_part4'),
+    'halfA': str(_BASE / 'hls4mlprj_skip4_halfA'),
+    'halfB': str(_BASE / 'hls4mlprj_skip4_halfB'),
 }
 _PROJECT_NAMES = {
     'full': 'my_proj_skip4_full',
@@ -116,6 +150,8 @@ _PROJECT_NAMES = {
     'part2': 'my_proj_skip4_p2',
     'part3': 'my_proj_skip4_p3',
     'part4': 'my_proj_skip4_p4',
+    'halfA': 'my_proj_skip4_hA',
+    'halfB': 'my_proj_skip4_hB',
 }
 
 # Path where the full-model FIFO optimization writes its results
@@ -182,8 +218,9 @@ def timed_step(key: str, name: str):
 
 
 if not _ARGS.magic_only:
-    for _key in _DIRS:
-        _open_tlog(_key)
+    for _key in ['full', *_PART_KEYS]:
+        if os.path.exists(_DIRS[_key]):
+            _open_tlog(_key)
 
 
 # ── HLS CONFIG HELPER (shared by run_model + diag) ────────────────────────────
@@ -327,7 +364,24 @@ _y = full_model.get_layer('dense_out')(full_model.get_layer('dense1')(full_model
 part4_model = Model([_p4m, _p4s1], _y, name='part4')
 part4_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
-print('All 5 Keras models built — weights shared via same layer objects.')
+# ── 2-PART SCHEME: encoder/decoder halves (share weights via same layer objects) ─
+# Half A — Encoder + Bottleneck (part1 ∪ part2): inp → [bottleneck, skip2, skip1]
+halfA_model = Model(inp, [p2_out, s2, s1], name='halfA')
+halfA_model.compile(optimizer='adam', loss='mse')
+
+# Half B — Decoder + Head (part3 ∪ part4): [bottleneck, skip2, skip1] → dense_out
+_hb_bn = Input(shape=(2, 2, 8), name='hb_bottleneck_inp')
+_hb_s2 = Input(shape=(4, 4, 16), name='hb_skip2_inp')
+_hb_s1 = Input(shape=(8, 8, 8), name='hb_skip1_inp')
+_y = full_model.get_layer('dec_conv1')(full_model.get_layer('dec_up1')(_hb_bn))  # (4,4,16)
+_y = full_model.get_layer('dec_conv1b')(full_model.get_layer('skip2_add')([_y, _hb_s2]))  # (4,4,16)
+_y = full_model.get_layer('dec_conv2')(full_model.get_layer('dec_up2')(_y))  # (8,8,8)
+_y = full_model.get_layer('skip1_add')([_y, _hb_s1])  # (8,8,8)
+_y = full_model.get_layer('dense_out')(full_model.get_layer('dense1')(full_model.get_layer('gap')(_y)))
+halfB_model = Model([_hb_bn, _hb_s2, _hb_s1], _y, name='halfB')
+halfB_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+print('All Keras models built (full + part1–4 + halfA/halfB) — weights shared via same layer objects.')
 
 
 # ── MAGIC STREAMER BUFFER CALCULATION ────────────────────────────────────────
@@ -603,7 +657,40 @@ _MODEL_OUTPUT_STREAMS = [
     },  # part3_store .. part4_load
 ]
 
-_magic_streamer_report(_MODEL_OUTPUT_STREAMS, _MAGIC_BANKS, 3)
+# 2-part scheme: halfA emits all three inter-partition streams together (region 0,
+# produced in phase 0, consumed by halfB in phase 1 — none can be reused/freed).
+_HALF_OUTPUT_STREAMS = [
+    # name, source tensor, region (= producer half), alloc phase, free phase (= consumer load phase)
+    {
+        'name': 'ha_bneck',
+        'shape': _shape_of(halfA_model.outputs[0]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 0,
+        'free_phase': 1,
+    },
+    {
+        'name': 'ha_skip2',
+        'shape': _shape_of(halfA_model.outputs[1]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 0,
+        'free_phase': 1,
+    },
+    {
+        'name': 'ha_skip1',
+        'shape': _shape_of(halfA_model.outputs[2]),
+        'precision': 16,
+        'region': 0,
+        'alloc_phase': 0,
+        'free_phase': 1,
+    },
+]
+
+# amt_phase = number of producing partitions = split - 1 (the terminal partition's
+# output is the final result and is never buffered): 4-part → 3, 2-part → 1.
+_streams = _MODEL_OUTPUT_STREAMS if _SPLIT == 4 else _HALF_OUTPUT_STREAMS
+_magic_streamer_report(_streams, _MAGIC_BANKS, _SPLIT - 1)
 
 if _ARGS.magic_only:
     print('[magic-only] Report complete — exiting without touching generated projects.')
@@ -617,24 +704,48 @@ X_full = X_pool[:NUM_QUERIES]
 # Derive each partition's input from the preceding sub-model.
 print('[derive] Computing partition inputs via Keras predict…')
 _bs = min(NUM_QUERIES, 128)
-[X_p2_in, X_skip1] = part1_model.predict(X_full, batch_size=_bs)  # p2 feed + skip1→part4
-[X_p3_main, X_skip2] = part2_model.predict(X_p2_in, batch_size=_bs)  # p3 feed + skip2→part3
-X_p4_main = part3_model.predict([X_p3_main, X_skip2], batch_size=_bs)  # p4 feed
-print(
-    f'[derive] p2_in={X_p2_in.shape}  skip1={X_skip1.shape}  '
-    f'p3_main={X_p3_main.shape}  skip2={X_skip2.shape}  p4_main={X_p4_main.shape}'
-)
 
 # ── PER-PARTITION RUN CONFIG ──────────────────────────────────────────────────
 # full_run=True  → predict + save results + build stub
 # full_run=False → stop after compile (compile error caught)
 _PART_CFG = {
     'full': dict(keras_model=full_model, X_input=X_full, input_flat=False, output_flat=False, full_run=True),
-    'part1': dict(keras_model=part1_model, X_input=X_full, input_flat=False, output_flat=True, full_run=False),
-    'part2': dict(keras_model=part2_model, X_input=X_p2_in, input_flat=True, output_flat=True, full_run=False),
-    'part3': dict(keras_model=part3_model, X_input=[X_p3_main, X_skip2], input_flat=True, output_flat=True, full_run=False),
-    'part4': dict(keras_model=part4_model, X_input=[X_p4_main, X_skip1], input_flat=True, output_flat=False, full_run=False),
 }
+if _SPLIT == 4:
+    [X_p2_in, X_skip1] = part1_model.predict(X_full, batch_size=_bs)  # p2 feed + skip1→part4
+    [X_p3_main, X_skip2] = part2_model.predict(X_p2_in, batch_size=_bs)  # p3 feed + skip2→part3
+    X_p4_main = part3_model.predict([X_p3_main, X_skip2], batch_size=_bs)  # p4 feed
+    print(
+        f'[derive] p2_in={X_p2_in.shape}  skip1={X_skip1.shape}  '
+        f'p3_main={X_p3_main.shape}  skip2={X_skip2.shape}  p4_main={X_p4_main.shape}'
+    )
+    _PART_CFG.update(
+        {
+            'part1': dict(keras_model=part1_model, X_input=X_full, input_flat=False, output_flat=True, full_run=False),
+            'part2': dict(keras_model=part2_model, X_input=X_p2_in, input_flat=True, output_flat=True, full_run=False),
+            'part3': dict(
+                keras_model=part3_model, X_input=[X_p3_main, X_skip2], input_flat=True, output_flat=True, full_run=False
+            ),
+            'part4': dict(
+                keras_model=part4_model, X_input=[X_p4_main, X_skip1], input_flat=True, output_flat=False, full_run=False
+            ),
+        }
+    )
+else:
+    [X_hb_bn, X_hb_s2, X_hb_s1] = halfA_model.predict(X_full, batch_size=_bs)  # halfB feed (bottleneck + skip2 + skip1)
+    print(f'[derive] halfB inputs  bottleneck={X_hb_bn.shape}  skip2={X_hb_s2.shape}  skip1={X_hb_s1.shape}')
+    _PART_CFG.update(
+        {
+            'halfA': dict(keras_model=halfA_model, X_input=X_full, input_flat=False, output_flat=True, full_run=False),
+            'halfB': dict(
+                keras_model=halfB_model,
+                X_input=[X_hb_bn, X_hb_s2, X_hb_s1],
+                input_flat=True,
+                output_flat=False,
+                full_run=False,
+            ),
+        }
+    )
 
 # ── DIAGNOSTIC: layer-by-layer HLS bisect ────────────────────────────────────
 _PROBE_LAYERS = [
@@ -860,9 +971,11 @@ _LABELS = {
     'part2': 'Part 2 Enc-B+BN   (in=True,  out=True )  [STOP AFTER COMPILE]',
     'part3': 'Part 3 Decoder-A  (in=True,  out=True )  [STOP AFTER COMPILE]',
     'part4': 'Part 4 Decoder-B  (in=True,  out=False)  [STOP AFTER COMPILE]',
+    'halfA': 'Half A Encoder    (in=False, out=True )  [STOP AFTER COMPILE]',
+    'halfB': 'Half B Decoder    (in=True,  out=False)  [STOP AFTER COMPILE]',
 }
 
-print(f'\nRunning mode: {_ARGS.mode}  → variants: {sorted(_RUN)}  fifo={_ARGS.fifo}')
+print(f'\nRunning mode: {_ARGS.mode}  split={_SPLIT}  → variants: {sorted(_RUN)}  fifo={_ARGS.fifo}')
 
 # When --fifo is active and 'full' is NOT being run this session, load the
 # pre-existing fifo_depths.json produced by a prior full run.
@@ -872,7 +985,7 @@ if _ARGS.fifo and 'full' not in _RUN:
         _fifo_depths = json.load(_fj)
     print(f'[fifo] Loaded {len(_fifo_depths)} FIFO entries ← {_FIFO_JSON_PATH}')
 
-for _key in ['full', 'part1', 'part2', 'part3', 'part4']:
+for _key in ['full', *_PART_KEYS]:
     if _key not in _RUN:
         continue
     print('\n' + '=' * 60)
