@@ -33,3 +33,4 @@ hls4mlprj_*
 
 # Test artifacts
 test/pytest/partialExp
+/exp_sz/
